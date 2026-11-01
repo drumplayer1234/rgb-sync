@@ -5,12 +5,14 @@ import logging
 
 from .backends.base import Device, LightingBackend
 from .backends.corsair import CorsairBackend
+from .backends.nuphy import NuPhyBackend
 from .backends.razer import RazerBackend
 
 log = logging.getLogger(__name__)
 
 # To add a brand, write a LightingBackend subclass and add it here.
-BACKEND_CLASSES: list[type[LightingBackend]] = [CorsairBackend, RazerBackend]
+BACKEND_CLASSES: list[type[LightingBackend]] = [CorsairBackend, RazerBackend,
+                                                   NuPhyBackend]
 
 
 class Manager:
