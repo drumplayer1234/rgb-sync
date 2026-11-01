@@ -1,4 +1,8 @@
-"""Headless smoke test: connect, print status and devices. Changes no colors."""
+"""Headless smoke test: connect, print status and devices. Changes no colors.
+
+REQUIRES REAL HARDWARE / vendor software (iCUE, Synapse, a NuPhy board), so it
+is not part of tests/run_all.py or CI. Run it by hand: python tests/smoke_test.py
+"""
 import logging
 import pathlib
 import sys

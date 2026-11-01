@@ -1,6 +1,7 @@
 """NuPhy edge-light (sidelight + halo) tests with a fake board. No hardware.
 
-Uses the real bytes saved in nuphy_backup_Halo65.json (read-only).
+Uses real Halo65 V1 lighting bytes from tests/fixtures/halo65_v1_state.json
+(read-only). All backups are written to temp dirs, never the repo root.
 Run: python tests/test_nuphy_edge.py   (plain asserts, no pytest needed)
 """
 import json
@@ -18,7 +19,7 @@ RED, GREEN, BLUE, YELLOW, PURPLE, CYAN, WHITE = range(7)
 
 
 def load_real() -> tuple[bytes, bytes]:
-    data = json.loads((ROOT / "nuphy_backup_Halo65.json").read_text("utf-8"))
+    data = json.loads((ROOT / "tests" / "fixtures" / "halo65_v1_state.json").read_text("utf-8"))
     return bytes.fromhex(data["effects_hex"]), bytes.fromhex(data["colors_hex"])
 
 
@@ -86,7 +87,7 @@ def test_nearest_colors() -> None:
 def test_apply_real_bytes_blue() -> None:
     board, old_e, old_c = apply((0, 0, 255))
     new_e = board.effects
-    assert old_e[12:20].hex() == "0500040001000400"            # user's real state
+    assert old_e[12:20].hex() == "0500040001000400"            # fixture's real state
     # Backlight as before.
     assert new_e[nuphy.I_BACKLIGHT_MODE] == nuphy.MODE_STATIC
     assert new_e[nuphy.I_CUSTOM_FLAG] == 0

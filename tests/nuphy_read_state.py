@@ -1,5 +1,8 @@
 """Read-only NuPhy check: connect, print the decoded lighting state.
 
+REQUIRES A REAL NuPhy KEYBOARD (USB cable) so it is not part of
+tests/run_all.py or CI. Run it by hand: python tests/nuphy_read_state.py
+
 Sends only the two read commands (05 83 b6 .. and 05 88 b8 ..) and never
 writes lighting data or calls set_color. Close NuPhy Console first.
 """

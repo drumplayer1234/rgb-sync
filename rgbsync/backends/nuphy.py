@@ -18,14 +18,9 @@ MIT License, Copyright (c) 2024 Mikhael Khrustik). Files ported:
 The Nuga.app source (mishamyrt/nuga-app) was consulted only to learn that the
 palette row index equals the mode code and that Win rows are 0-23, Mac 24-47.
 
-MIT License notice (nuga-lib): Permission is hereby granted, free of charge, to
-any person obtaining a copy of this software and associated documentation
-files, to deal in the Software without restriction, including without
-limitation the rights to use, copy, modify, merge, publish, distribute,
-sublicense, and/or sell copies of the Software, subject to the inclusion of
-the above copyright notice and this permission notice in all copies or
-substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS",
-WITHOUT WARRANTY OF ANY KIND.
+License: nuga-lib is MIT licensed; its copyright notice and full license text are
+reproduced in THIRD_PARTY_NOTICES.md at the repository root, as the license
+requires.
 
 Differences from nuga-lib (deliberate)
 --------------------------------------
