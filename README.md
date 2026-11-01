@@ -30,6 +30,12 @@ pip install -r requirements.txt
 ```
 python main.py
 ```
+
+**Restore original** (next to Apply to all and Rescan) asks for confirmation, then puts
+every device back to how it was before RGB Sync changed it: Corsair and Razer give control
+back so iCUE / Synapse show their own lighting again (nothing is stored on those devices),
+and NuPhy is written back from its `nuphy_backup_<model>.json`. A NuPhy with no backup
+file was never changed, so it reports "nothing to restore" and nothing is written.
 The last color is remembered in `settings.json` next to the app.
 Headless check (changes no colors): `python tests/smoke_test.py`
 

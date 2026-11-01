@@ -562,10 +562,15 @@ class NuPhyBackend(LightingBackend):
             if palette_changed and board.read_colors() != bytes(new_colors):
                 raise _ProtocolError("read-back of palette differs")
 
+    def restore(self) -> str:
+        """Put the keyboard back as saved; stays connected (no reconnect)."""
+        return self.restore_backup()
+
     def restore_backup(self) -> str:
         """Write the saved original lighting back to each connected board.
 
-        Returns a human-readable result (one line per board).
+        Returns a human-readable result (one line per board). A board with no
+        backup file was never changed by this app, so nothing is written.
         """
         with self._lock:
             if not self._boards:
@@ -574,8 +579,8 @@ class NuPhyBackend(LightingBackend):
             for board in list(self._boards):
                 path = _backup_path(board)
                 if not path.exists():
-                    lines.append(f"{board.product}: no backup file "
-                                 f"({path.name}), nothing restored")
+                    lines.append(f"{board.product}: nothing to restore "
+                                 f"(never changed, no backup file)")
                     continue
                 try:
                     effects, colors = _load_backup(path)

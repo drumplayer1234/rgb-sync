@@ -29,6 +29,7 @@ class RazerBackend(LightingBackend):
     """Controls Razer Chroma devices through the local Synapse REST server."""
 
     name = "Razer"
+    restored_text = "back to Synapse lighting"
 
     def __init__(self) -> None:
         self.status = "not connected"

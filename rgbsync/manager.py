@@ -58,6 +58,25 @@ class Manager:
                 log.exception("%s set_color crashed", backend.name)
                 backend.status = f"error: {exc}"
 
+    def restore_all(self) -> dict[str, str]:
+        """Put every connected backend back to its original lighting.
+
+        Returns {backend name: short result}. Backends that are not connected
+        are skipped; one failing never stops the others.
+        """
+        results: dict[str, str] = {}
+        for backend in self.backends:
+            if not backend.status.startswith("connected"):
+                results[backend.name] = "not connected"
+                continue
+            try:
+                results[backend.name] = backend.restore()
+            except Exception as exc:
+                log.exception("%s restore crashed", backend.name)
+                backend.status = f"error: {exc}"
+                results[backend.name] = f"error: {exc}"
+        return results
+
     def close_all(self) -> None:
         """Release control on every backend."""
         for backend in self.backends:

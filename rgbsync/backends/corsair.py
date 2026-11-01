@@ -51,6 +51,7 @@ class CorsairBackend(LightingBackend):
     """Controls Corsair devices through the running iCUE application."""
 
     name = "Corsair"
+    restored_text = "back to iCUE lighting"
 
     def __init__(self) -> None:
         self.status = "not connected"

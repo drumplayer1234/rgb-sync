@@ -8,7 +8,7 @@ import threading
 import tkinter as tk
 from collections.abc import Callable
 from pathlib import Path
-from tkinter import colorchooser, ttk
+from tkinter import colorchooser, messagebox, ttk
 
 from .manager import Manager
 
@@ -109,6 +109,9 @@ class App:
         self.apply_btn.pack(side="left")
         self.rescan_btn = ttk.Button(actions, text="Rescan", command=self.rescan)
         self.rescan_btn.pack(side="left", padx=6)
+        self.restore_btn = ttk.Button(actions, text="Restore original",
+                                      command=self.restore)
+        self.restore_btn.pack(side="left")
         self.message = ttk.Label(actions, text="")
         self.message.pack(side="left", padx=10)
 
@@ -136,8 +139,10 @@ class App:
             except Exception:
                 log.exception("worker job failed")
 
-    def _submit(self, work: Callable[[], None], message: str) -> None:
-        """Run `work` on the worker, then refresh the UI on the main thread."""
+    def _submit(self, work: Callable[[], None], message: str,
+                on_done: Callable[[], None] | None = None) -> None:
+        """Run `work` on the worker, then refresh the UI on the main thread
+        (and call `on_done` there, if given)."""
         if self._busy or self._closing:
             return
         self._busy = True
@@ -153,11 +158,12 @@ class App:
                 devices = []
             statuses = self.manager.statuses()
             if not self._closing:
-                self.root.after(0, lambda: self._done(devices, statuses))
+                self.root.after(0, lambda: self._done(devices, statuses, on_done))
 
         self._jobs.put(job)
 
-    def _done(self, devices, statuses) -> None:
+    def _done(self, devices, statuses,
+              on_done: Callable[[], None] | None = None) -> None:
         """Main-thread refresh after a worker job."""
         self._busy = False
         self._set_buttons("normal")
@@ -167,10 +173,13 @@ class App:
             self.tree.insert("", "end", values=(d.backend, d.name, d.kind))
         for name, label in self.status_labels.items():
             label.configure(text=f"{name}: {statuses.get(name, '?')}")
+        if on_done:
+            on_done()
 
     def _set_buttons(self, state: str) -> None:
         self.apply_btn.configure(state=state)
         self.rescan_btn.configure(state=state)
+        self.restore_btn.configure(state=state)
 
     def rescan(self) -> None:
         """Reconnect all backends and refresh the device list."""
@@ -180,6 +189,27 @@ class App:
         """Apply the current color to every device."""
         r, g, b = hex_to_rgb(self.color)
         self._submit(lambda: self.manager.apply_color(r, g, b), "Applying...")
+
+    def restore(self) -> None:
+        """Ask, then put every device back to its original lighting."""
+        if self._busy or self._closing:
+            return
+        if not messagebox.askyesno(
+                "Restore original",
+                "Put every device back to how it was before RGB Sync changed it?",
+                parent=self.root):
+            return
+        results: dict[str, str] = {}
+
+        def work() -> None:
+            results.update(self.manager.restore_all())
+
+        def show() -> None:  # runs on the main thread after the refresh
+            text = "\n".join(f"{name}: {msg}" for name, msg in results.items())
+            messagebox.showinfo("Restore original", text or "Nothing to restore.",
+                                parent=self.root)
+
+        self._submit(work, "Restoring...", show)
 
     # --- shutdown -------------------------------------------------------
     def on_close(self) -> None:

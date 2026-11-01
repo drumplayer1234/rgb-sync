@@ -22,6 +22,8 @@ class LightingBackend(ABC):
     name: str = "Unknown"
     #: Human-readable state: "connected", "not found: <why>" or "error: <why>".
     status: str = "not connected"
+    #: Result text of the default `restore()` when reconnecting worked.
+    restored_text: str = "back to default lighting"
 
     @abstractmethod
     def connect(self) -> bool:
@@ -38,3 +40,15 @@ class LightingBackend(ABC):
     @abstractmethod
     def close(self) -> None:
         """Release SDK control and free resources. Safe to call repeatedly."""
+
+    def restore(self) -> str:
+        """Hand lighting back to the vendor app; returns a short result.
+
+        Default for SDKs that store nothing on the device: release control
+        (the vendor app shows its own lighting again), then reconnect without
+        setting any color so this app stays usable.
+        """
+        self.close()
+        if self.connect():
+            return self.restored_text
+        return f"released control, but reconnect failed ({self.status})"
