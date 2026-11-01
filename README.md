@@ -14,7 +14,10 @@ pip install -r requirements.txt
 - **NuPhy (Halo65/75/96, V1 firmware):** the keyboard must be connected by **USB cable**
   (wireless / Bluetooth mode cannot be controlled) and **NuPhy Console must be closed**.
   The main backlight is switched to its Static mode with the exact color (one slot of
-  the Static color palette is rewritten); halo and side lights are left alone.
+  the Static color palette is rewritten). The edge lights (side lights and halo) follow too,
+  set to their fixed mode, but they only have 7 preset colors (red, green, blue, yellow, purple,
+  cyan, white), so the closest preset is used; turn this off with `SYNC_EDGE_LIGHTS = False`
+  at the top of `rgbsync/backends/nuphy.py`.
   This backend is a Python port of the HID protocol reverse-engineered in
   [mishamyrt/nuga-lib](https://github.com/mishamyrt/nuga-lib) (MIT License,
   Copyright (c) 2024 Mikhael Khrustik); see the header of `rgbsync/backends/nuphy.py`.

@@ -66,6 +66,13 @@ Arbitrary RGB: the main backlight in Static mode (code 1) shows palette slot
 (this is what Nuga.app's color picker does), so ``set_color`` writes the exact
 (r, g, b) into one dedicated slot of the Static row and selects it. Nothing is
 rounded to a fixed palette.
+
+Edge lights (sidelight + halo) are different: they have NO editable palette.
+Their color byte (effects block [13] / [17]) is an index 0-6 into a fixed list
+hard-coded in the Nuga UI (red, green, blue, yellow, purple, cyan, white; 7 =
+random is rejected for these lights by nuga-lib). Nuga's color editor only
+exists for the backlight. So ``set_color`` switches both edge lights to their
+static mode and picks the *nearest* of those 7 colors (``_nearest_fixed_color``).
 """
 from __future__ import annotations
 
@@ -75,6 +82,8 @@ import os
 import re
 import threading
 import time
+import colorsys
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -130,7 +139,23 @@ I_HALO = 16                  # mode, color, brightness, speed
 I_BACKLIGHT_PARAMS = 22      # 29 x (color, speed*16 + brightness), by code-1
 BACKLIGHT_PARAMS_COUNT = 29
 
+#: Also color the edge lights (sidelight + halo) in ``set_color``. They can only
+#: show 7 preset colors, so the nearest one is used. Set False to leave them alone.
+SYNC_EDGE_LIGHTS = True
+
 MODE_STATIC = 1              # features/light/domain.go BacklightStatic
+SIDELIGHT_FIXED = 3          # domain.go SidelightFixed ("Fixed on")
+HALO_FIXED = 3               # domain.go HalolightFixed ("Fixed")
+#: Misc-light brightness is 0-4 (effect-misc.go SetBrightness); used only when
+#: the current value is 0.
+MISC_MID_BRIGHTNESS = 2
+#: Fixed color list of sidelight/halo (Nuga UI ``defaultColors``); the index is
+#: the color byte. Index 7 (random) is never used for these lights.
+FIXED_COLORS = (
+    ("red", (255, 0, 0)), ("green", (0, 255, 0)), ("blue", (0, 0, 255)),
+    ("yellow", (255, 255, 0)), ("purple", (255, 0, 255)),
+    ("cyan", (0, 255, 255)), ("white", (255, 255, 255)),
+)
 #: Palette slot rewritten with the requested color (the "white" swatch of the
 #: Static row; slot 7 would mean random and must never be used).
 SYNC_SLOT = 6
@@ -283,6 +308,27 @@ class _Board:
         self.write(CMD_SET_COLORS + colors)
 
 
+def _nearest_fixed_color(r: int, g: int, b: int) -> int:
+    """Index (0-6) of the edge-light preset color closest to (r, g, b).
+
+    Compared in HSV with brightness ignored (the lights have their own
+    brightness setting), so dark blue still maps to blue, not to black/white.
+    Hue and saturation form a point on the color wheel (radius = saturation):
+    the six hues sit on the rim and white at the centre. Grays, near-grays and
+    black therefore map to white.
+    """
+    h, s, _v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+    x, y = s * math.cos(h * 2 * math.pi), s * math.sin(h * 2 * math.pi)
+    best, best_dist = 6, math.hypot(x, y)  # white (centre) wins ties
+    for index, (_name, (pr, pg, pb)) in enumerate(FIXED_COLORS[:6]):
+        ph, _ps, _pv = colorsys.rgb_to_hsv(pr / 255, pg / 255, pb / 255)
+        dist = math.hypot(x - math.cos(ph * 2 * math.pi),
+                          y - math.sin(ph * 2 * math.pi))
+        if dist < best_dist - 1e-9:
+            best, best_dist = index, dist
+    return best
+
+
 def _palette_row(colors: bytes, row: int) -> list[str]:
     base = row * COLORS_PER_MODE * 3
     return ["#" + colors[base + i * 3:base + i * 3 + 3].hex()
@@ -392,8 +438,10 @@ class NuPhyBackend(LightingBackend):
 
     ``set_color`` switches the main backlight to Static mode and shows the
     exact requested RGB (palette slot 6 of the Static row, in both the Windows
-    and Mac banks, is rewritten with it). Halo/side lights, keymaps, macros and
-    all other lighting bytes are echoed back unchanged. Wireless / Bluetooth
+    and Mac banks, is rewritten with it). With ``SYNC_EDGE_LIGHTS`` the side
+    lights and halo are set to their fixed mode in the nearest of their 7 preset
+    colors (they cannot show arbitrary RGB). Keymaps, macros and all other
+    lighting bytes are echoed back unchanged. Wireless / Bluetooth
     mode cannot be controlled. Close NuPhy Console while this app runs.
     """
 
@@ -525,7 +573,8 @@ class NuPhyBackend(LightingBackend):
 
     @staticmethod
     def _apply(board: _Board, rgb: bytes) -> None:
-        """Read-modify-write: Static mode + exact RGB, everything else kept.
+        """Read-modify-write: Static mode + exact RGB (+ nearest preset on the edge
+        lights), everything else kept.
 
         The first time, the original blocks are saved to a backup file; if
         that fails nothing is written to the keyboard.
@@ -549,6 +598,17 @@ class NuPhyBackend(LightingBackend):
         new[off] = SYNC_SLOT
         if new[off + 1] == 0:
             new[off + 1] = MID_VALUE
+
+        if SYNC_EDGE_LIGHTS:
+            color = _nearest_fixed_color(*rgb)
+            for index, fixed_mode in ((I_SIDELIGHT, SIDELIGHT_FIXED),
+                                      (I_HALO, HALO_FIXED)):
+                new[index] = fixed_mode
+                new[index + 1] = color
+                if new[index + 2] == 0:  # brightness 0-4; speed is left as is
+                    new[index + 2] = MISC_MID_BRIGHTNESS
+            log.info("edge lights use preset colors; closest to #%s is %s",
+                     rgb.hex(), FIXED_COLORS[color][0])
         effects_changed = bytes(new) != effects
 
         if palette_changed:
