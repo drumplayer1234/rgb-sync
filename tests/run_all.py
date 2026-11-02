@@ -1,6 +1,6 @@
 """Run every hardware-free test as a subprocess; exit non-zero on any failure.
 
-Included: test_nuphy_backup.py, test_restore.py, test_nuphy_edge.py.
+Included: test_nuphy_backup.py, test_restore.py, test_nuphy_edge.py, test_live_frame.py.
 Not included (need real hardware / vendor software): smoke_test.py and
 nuphy_read_state.py.
 
@@ -11,7 +11,8 @@ import subprocess
 import sys
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
-TESTS = ("test_nuphy_backup.py", "test_restore.py", "test_nuphy_edge.py")
+TESTS = ("test_nuphy_backup.py", "test_restore.py", "test_nuphy_edge.py",
+         "test_live_frame.py")
 
 
 def main() -> int:
