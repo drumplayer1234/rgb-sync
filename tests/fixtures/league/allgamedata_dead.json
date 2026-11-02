@@ -1,0 +1,192 @@
+{
+  "activePlayer": {
+    "abilities": {},
+    "championStats": {
+      "currentHealth": 0.0,
+      "maxHealth": 1000.0
+    },
+    "currentGold": 1234.5,
+    "level": 9,
+    "riotId": "TestPlayer#NA1",
+    "riotIdGameName": "TestPlayer",
+    "riotIdTagLine": "NA1",
+    "summonerName": "TestPlayer"
+  },
+  "allPlayers": [
+    {
+      "championName": "Ahri",
+      "rawChampionName": "game_character_displayname_Ahri",
+      "isBot": false,
+      "isDead": true,
+      "respawnTimer": 12.5,
+      "level": 9,
+      "riotId": "TestPlayer#NA1",
+      "riotIdGameName": "TestPlayer",
+      "riotIdTagLine": "NA1",
+      "summonerName": "TestPlayer",
+      "skinID": 3,
+      "team": "ORDER",
+      "position": "MIDDLE",
+      "scores": {
+        "kills": 1,
+        "deaths": 0,
+        "assists": 2,
+        "creepScore": 50,
+        "wardScore": 3.0
+      }
+    },
+    {
+      "championName": "Wukong",
+      "rawChampionName": "game_character_displayname_MonkeyKing",
+      "isBot": false,
+      "isDead": false,
+      "respawnTimer": 0.0,
+      "level": 9,
+      "riotId": "AllyOne#NA1",
+      "riotIdGameName": "AllyOne",
+      "riotIdTagLine": "NA1",
+      "summonerName": "AllyOne",
+      "skinID": 0,
+      "team": "ORDER",
+      "position": "MIDDLE",
+      "scores": {
+        "kills": 1,
+        "deaths": 0,
+        "assists": 2,
+        "creepScore": 50,
+        "wardScore": 3.0
+      }
+    },
+    {
+      "championName": "Zed",
+      "rawChampionName": "game_character_displayname_Zed",
+      "isBot": false,
+      "isDead": false,
+      "respawnTimer": 0.0,
+      "level": 9,
+      "riotId": "EnemyOne#NA1",
+      "riotIdGameName": "EnemyOne",
+      "riotIdTagLine": "NA1",
+      "summonerName": "EnemyOne",
+      "skinID": 0,
+      "team": "CHAOS",
+      "position": "MIDDLE",
+      "scores": {
+        "kills": 1,
+        "deaths": 0,
+        "assists": 2,
+        "creepScore": 50,
+        "wardScore": 3.0
+      }
+    },
+    {
+      "championName": "Jinx",
+      "rawChampionName": "game_character_displayname_Jinx",
+      "isBot": false,
+      "isDead": false,
+      "respawnTimer": 0.0,
+      "level": 9,
+      "riotId": "EnemyTwo#NA1",
+      "riotIdGameName": "EnemyTwo",
+      "riotIdTagLine": "NA1",
+      "summonerName": "EnemyTwo",
+      "skinID": 1,
+      "team": "CHAOS",
+      "position": "MIDDLE",
+      "scores": {
+        "kills": 1,
+        "deaths": 0,
+        "assists": 2,
+        "creepScore": 50,
+        "wardScore": 3.0
+      }
+    }
+  ],
+  "events": {
+    "Events": [
+      {
+        "EventID": 0,
+        "EventName": "GameStart",
+        "EventTime": 0.05
+      },
+      {
+        "EventID": 1,
+        "EventName": "MinionsSpawning",
+        "EventTime": 65.0
+      },
+      {
+        "EventID": 2,
+        "EventName": "FirstBlood",
+        "EventTime": 240.0,
+        "Recipient": "TestPlayer"
+      },
+      {
+        "EventID": 3,
+        "EventName": "ChampionKill",
+        "EventTime": 240.0,
+        "KillerName": "TestPlayer",
+        "VictimName": "EnemyOne",
+        "Assisters": []
+      },
+      {
+        "EventID": 4,
+        "EventName": "ChampionKill",
+        "EventTime": 400.0,
+        "KillerName": "EnemyOne",
+        "VictimName": "AllyOne",
+        "Assisters": [
+          "EnemyTwo"
+        ]
+      },
+      {
+        "EventID": 5,
+        "EventName": "ChampionKill",
+        "EventTime": 500.0,
+        "KillerName": "AllyOne",
+        "VictimName": "EnemyTwo",
+        "Assisters": [
+          "TestPlayer"
+        ]
+      },
+      {
+        "EventID": 6,
+        "EventName": "DragonKill",
+        "EventTime": 600.0,
+        "DragonType": "Fire",
+        "KillerName": "AllyOne",
+        "Stolen": "False",
+        "Assisters": []
+      },
+      {
+        "EventID": 7,
+        "EventName": "DragonKill",
+        "EventTime": 800.0,
+        "DragonType": "Water",
+        "KillerName": "EnemyTwo",
+        "Stolen": "False",
+        "Assisters": []
+      },
+      {
+        "EventID": 8,
+        "EventName": "TurretKilled",
+        "EventTime": 850.0,
+        "TurretKilled": "Turret_T2_L_03_A",
+        "KillerName": "Minion_T100L1S3",
+        "Assisters": []
+      },
+      {
+        "EventID": 9,
+        "EventName": "Multikill",
+        "EventTime": 900.0,
+        "KillerName": "TestPlayer",
+        "KillStreak": 3
+      }
+    ]
+  },
+  "gameData": {
+    "gameMode": "CLASSIC",
+    "gameTime": 905.5,
+    "mapName": "Map11",
+    "mapNumber": 11
+  }
+}

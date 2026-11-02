@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 from .base import Device, LightingBackend
+from ..scene import Scene
 
 log = logging.getLogger(__name__)
 
@@ -16,6 +18,8 @@ except Exception as exc:  # package missing or DLL cannot load
     _IMPORT_ERROR = str(exc)
 
 CONNECT_TIMEOUT_S = 5.0
+#: Live mode: resend an unchanged color after this long (keepalive).
+LIVE_KEEPALIVE_S = 1.0
 _KEEP_ALIVE: list = []  # ctypes callbacks that must outlive disconnect()
 
 _KIND_NAMES = {
@@ -58,6 +62,11 @@ class CorsairBackend(LightingBackend):
         self._sdk: CueSdk | None = None
         self._connected = False
         self._lock = threading.Lock()
+        self._clock = time.monotonic  # replaced in tests
+        self._live_leds: list[tuple[str, str, list[int]]] = []  # id, model, led ids
+        self._live_last: tuple[int, int, int] | None = None
+        self._live_last_t = 0.0
+        self._live_error = False
 
     def connect(self) -> bool:
         self.close()
@@ -85,6 +94,7 @@ class CorsairBackend(LightingBackend):
             value = state["value"]
             if value is not None and value == CorsairSessionState.CSS_Connected:
                 self._connected = True
+                self.supports_live = True
                 self.status = "connected"
                 return True
             if value is None:
@@ -141,7 +151,71 @@ class CorsairBackend(LightingBackend):
             else:
                 self.status = "connected"
 
+    # -- live lighting -------------------------------------------------------
+    # Every LED of every device shows ``scene.base``. Per-key colors
+    # (``scene.keys``) are deliberately ignored: the user owns no Corsair
+    # keyboard, and mapping key names to iCUE LED ids would be untestable.
+    def start_live(self) -> None:
+        """Cache each device's LED ids once so ``render`` never queries them."""
+        with self._lock:
+            self._live_last = None
+            self._live_error = False
+            leds_by_device: list[tuple[str, str, list[int]]] = []
+            if not (self._connected and self._sdk):
+                self._live_leds = []
+                return
+            try:
+                for dev in self._corsair_devices():
+                    leds, err = self._sdk.get_led_positions(dev.device_id)
+                    if err != CorsairError.CE_Success or not leds:
+                        log.warning("Corsair live: %s positions %s",
+                                    dev.model, _err_text(err))
+                        continue
+                    leds_by_device.append(
+                        (dev.device_id, dev.model, [led.id for led in leds]))
+            except Exception as exc:
+                log.exception("Corsair start_live failed")
+                self.status = f"error: {exc}"
+            self._live_leds = leds_by_device
+
+    def render(self, scene: Scene) -> None:
+        """Set every LED to ``scene.base``; unchanged colors are resent at 1 Hz."""
+        try:
+            rgb = tuple(max(0, min(255, int(c))) for c in scene.base)
+            now = self._clock()
+            with self._lock:
+                if not (self._connected and self._sdk and self._live_leds):
+                    return
+                if (rgb == self._live_last
+                        and now - self._live_last_t < LIVE_KEEPALIVE_S):
+                    return
+                r, g, b = rgb
+                failures = []
+                for device_id, model, led_ids in self._live_leds:
+                    colors = [CorsairLedColor(id=i, r=r, g=g, b=b, a=255)
+                              for i in led_ids]
+                    err = self._sdk.set_led_colors(device_id, colors)
+                    if err != CorsairError.CE_Success:
+                        failures.append(f"{model}: set colors {_err_text(err)}")
+                self._live_last, self._live_last_t = rgb, now
+                if failures:
+                    self._live_error = True
+                    self.status = ("connected, but some devices failed: "
+                                   + "; ".join(failures))
+                elif self._live_error:
+                    self._live_error = False
+                    self.status = "connected"
+        except Exception as exc:
+            log.warning("Corsair render failed: %s", exc)
+            self.status = f"error: {exc}"
+
+    def stop_live(self) -> None:
+        """Nothing to undo: iCUE keeps the last colors (use Restore to hand back)."""
+        self._live_leds = []
+        self._live_last = None
+
     def close(self) -> None:
+        self.supports_live = False
         with self._lock:
             sdk, self._sdk, self._connected = self._sdk, None, False
         if sdk is None:

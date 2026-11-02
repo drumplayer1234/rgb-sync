@@ -34,6 +34,10 @@ class Manager:
             log.info("%s: %s", backend.name, backend.status)
         return results
 
+    def live_backends(self) -> list[LightingBackend]:
+        """Backends that are connected and can show live frames right now."""
+        return [b for b in self.backends if getattr(b, "supports_live", False)]
+
     def statuses(self) -> dict[str, str]:
         """Current status line for each backend."""
         return {b.name: b.status for b in self.backends}

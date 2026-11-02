@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # avoid an import cycle at runtime
+    from ..scene import Scene
 
 
 @dataclass(frozen=True)
@@ -24,6 +28,9 @@ class LightingBackend(ABC):
     status: str = "not connected"
     #: Result text of the default `restore()` when reconnecting worked.
     restored_text: str = "back to default lighting"
+    #: True when this backend can show real-time ``Scene`` frames (see
+    #: ``render``). May be set per instance after ``connect()``.
+    supports_live: bool = False
 
     @abstractmethod
     def connect(self) -> bool:
@@ -52,3 +59,22 @@ class LightingBackend(ABC):
         if self.connect():
             return self.restored_text
         return f"released control, but reconnect failed ({self.status})"
+
+    # -- live (real-time) lighting -----------------------------------------
+    # Driven by rgbsync.live.LiveEngine: start_live() once, then render() on
+    # every tick, then stop_live() once. All three default to no-ops.
+
+    def start_live(self) -> None:
+        """Called once before the first ``render``. Cache per-device data here."""
+
+    def render(self, scene: "Scene") -> None:
+        """Show one live frame.
+
+        Called from the engine thread at up to 30 fps, so it must be fast
+        (skip work when nothing changed) and must NEVER raise: catch errors,
+        set ``status`` and carry on. Anything slow or saved to the device must
+        be rate limited or moved to a worker thread by the backend itself.
+        """
+
+    def stop_live(self) -> None:
+        """Called once after the last ``render``; leave the device in a sane state."""

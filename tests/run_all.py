@@ -1,6 +1,8 @@
 """Run every hardware-free test as a subprocess; exit non-zero on any failure.
 
-Included: test_nuphy_backup.py, test_restore.py, test_nuphy_edge.py, test_live_frame.py.
+Included: test_nuphy_backup.py, test_restore.py, test_nuphy_edge.py, test_live_frame.py,
+test_live_nuphy.py, test_live_engine.py,
+test_league_client.py, test_league_colors.py, test_league_effects.py, test_league_sim.py.
 Not included (need real hardware / vendor software): smoke_test.py and
 nuphy_read_state.py.
 
@@ -12,7 +14,9 @@ import sys
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
 TESTS = ("test_nuphy_backup.py", "test_restore.py", "test_nuphy_edge.py",
-         "test_live_frame.py")
+         "test_live_frame.py", "test_live_nuphy.py", "test_live_engine.py",
+         "test_league_client.py", "test_league_colors.py", "test_league_effects.py",
+         "test_league_sim.py")
 
 
 def main() -> int:

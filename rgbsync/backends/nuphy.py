@@ -68,6 +68,18 @@ hard-coded in the Nuga UI (red, green, blue, yellow, purple, cyan, white; 7 =
 random is rejected for these lights by nuga-lib). Nuga's color editor only
 exists for the backlight. So ``set_color`` switches both edge lights to their
 static mode and picks the *nearest* of those 7 colors (``_nearest_fixed_color``).
+
+Live lighting (real time, not saved)
+------------------------------------
+Besides the saved settings above, the key backlight accepts a 30 fps stream:
+HID **feature report 8** on the vendor collection whose descriptor declares
+report 8 with 381 payload bytes. Frame = ``08 0A 7A 01`` + 378 bytes, i.e. 126
+LED slots x (R, G, B) interleaved (``slot = column * 6 + row``). Frames go to
+RAM only (nothing is written to flash, ~6 ms per send) and only the key
+backlight reacts; side lights and halo are not part of the frame, so
+``Scene.edge`` goes through the slow saved-settings path instead (see
+``_apply_edge``). Verified on a Halo65 V1, firmware 1.1.8; slot maps for other
+models are not known yet (``KEY_SLOTS_BY_MODEL``).
 """
 from __future__ import annotations
 
@@ -83,6 +95,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .base import Device, LightingBackend
+from ..scene import RGB, Scene
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +176,36 @@ MID_VALUE = 0x22
 BACKUP_DIR = Path(__file__).resolve().parents[2]
 BACKUP_PREFIX = "nuphy_backup_"
 
+# --- live frames (feature report 8) -----------------------------------------
+LIVE_REPORT_ID = 0x08
+LIVE_REPORT_PAYLOAD = 381    # descriptor size of report 8 (without the ID)
+LIVE_HEADER = bytes([0x08, 0x0A, 0x7A, 0x01])
+LIVE_FRAME_LEN = 382         # report ID + 381
+LIVE_SLOTS = 126             # 21 columns x 6 rows, 3 bytes each = 378
+LIVE_KEEPALIVE_S = 1.0       # resend an unchanged frame after this long
+#: Minimum time between two flash writes of the edge lights.
+EDGE_MIN_INTERVAL_S = 10.0
+
+#: Halo65 key name (``Scene.keys`` names) -> LED slot (``column * 6 + row``),
+#: taken from NuPhy Console's configuration for this model.
+HALO65_KEY_SLOTS: dict[str, int] = {
+    "ESC": 1, "1": 7, "2": 13, "3": 19, "4": 25, "5": 31, "6": 37, "7": 43,
+    "8": 49, "9": 55, "0": 61, "MINUS": 67, "EQUAL": 73, "BACKSPACE": 79,
+    "TAB": 2, "Q": 8, "W": 14, "E": 20, "R": 26, "T": 32, "Y": 38, "U": 44,
+    "I": 50, "O": 56, "P": 62, "LBRACKET": 68, "RBRACKET": 74,
+    "BACKSLASH": 80,
+    "CAPS": 3, "A": 9, "S": 15, "D": 21, "F": 27, "G": 33, "H": 39, "J": 45,
+    "K": 51, "L": 57, "SEMICOLON": 63, "QUOTE": 69, "ENTER": 81,
+    "LSHIFT": 4, "Z": 10, "X": 16, "C": 22, "V": 28, "B": 34, "N": 40,
+    "M": 46, "COMMA": 52, "PERIOD": 58, "SLASH": 64, "RSHIFT": 82, "UP": 88,
+    "LCTRL": 5, "LWIN": 11, "LALT": 17, "SPACE": 35, "RALT": 53, "FN": 59,
+    "LEFT": 83, "DOWN": 89, "RIGHT": 95,
+    "DEL": 91, "PGUP": 92, "PGDN": 93, "END": 94,
+}
+#: Model name (as in ``SUPPORTED_MODELS``) -> key slot map. Add Halo75/96 here
+#: once their maps are known; models without an entry get no live mode.
+KEY_SLOTS_BY_MODEL: dict[str, dict[str, int]] = {"Halo65": HALO65_KEY_SLOTS}
+
 BACKLIGHT_MODES = {
     0: "Lights off", 1: "Static", 2: "Respire", 3: "Rainbow", 4: "Flash away",
     6: "Rainbow wheel", 7: "Ripples shining", 8: "Stars twinkle",
@@ -221,17 +264,20 @@ class _Board:
     """One opened keyboard: command handle (report 5), data handle (report 6)."""
 
     def __init__(self, key: str, product: str, model: str, firmware: str,
-                 cmd_dev, data_dev) -> None:
+                 cmd_dev, data_dev, live_dev=None) -> None:
         self.key = key
         self.product = product
         self.model = model
         self.firmware = firmware
         self.cmd_dev = cmd_dev
         self.data_dev = data_dev
+        self.live_dev = live_dev  # report-8 collection, None if absent
+        self.last_frame: bytes | None = None   # last live frame sent
+        self.last_sent_t = 0.0
 
     def close(self) -> None:
         seen = []
-        for dev in (self.cmd_dev, self.data_dev):
+        for dev in (self.cmd_dev, self.data_dev, self.live_dev):
             if dev is None or any(dev is s for s in seen):
                 continue
             seen.append(dev)
@@ -239,7 +285,7 @@ class _Board:
                 dev.close()
             except Exception:
                 log.debug("NuPhy handle close failed", exc_info=True)
-        self.cmd_dev = self.data_dev = None
+        self.cmd_dev = self.data_dev = self.live_dev = None
 
     # -- transport ---------------------------------------------------------
     def _send(self, dev, payload: bytes) -> None:
@@ -302,6 +348,38 @@ class _Board:
     def write_colors(self, colors: bytes) -> None:
         self.write(CMD_SET_COLORS + colors)
 
+    def send_frame(self, frame: bytes) -> None:
+        """Send one live frame (report 8). One attempt, no sync delay, no retry:
+        the next frame is 33 ms away anyway."""
+        dev = self.live_dev
+        if dev is None:
+            raise _ProtocolError("no live-frame handle")
+        if len(frame) != LIVE_FRAME_LEN or frame[:4] != LIVE_HEADER:
+            raise _ProtocolError("refusing malformed live frame")
+        sent = dev.send_feature_report(frame)
+        if sent is not None and sent != len(frame):
+            raise _ProtocolError(f"sent {sent} of {len(frame)} live bytes")
+
+
+def _clamp_rgb(color) -> RGB:
+    r, g, b = color
+    return (max(0, min(255, int(r))), max(0, min(255, int(g))),
+            max(0, min(255, int(b))))
+
+
+def build_live_frame(base: RGB, keys: dict[str, RGB],
+                     slots: dict[str, int]) -> bytes:
+    """Report-8 frame: ``base`` in all 126 slots, then ``keys`` by slot.
+
+    Key names missing from ``slots`` are ignored. Pure function.
+    """
+    payload = bytearray(bytes(_clamp_rgb(base)) * LIVE_SLOTS)
+    for name, color in keys.items():
+        slot = slots.get(str(name).upper())
+        if slot is not None:
+            payload[slot * 3:slot * 3 + 3] = bytes(_clamp_rgb(color))
+    return LIVE_HEADER + bytes(payload) + bytes(LIVE_FRAME_LEN - 4 - len(payload))
+
 
 def _nearest_fixed_color(r: int, g: int, b: int) -> int:
     """Index (0-6) of the edge-light preset color closest to (r, g, b).
@@ -322,6 +400,42 @@ def _nearest_fixed_color(r: int, g: int, b: int) -> int:
         if dist < best_dist - 1e-9:
             best, best_dist = index, dist
     return best
+
+
+def _set_edge_bytes(new: bytearray, rgb: bytes) -> int:
+    """Put both edge lights in fixed mode with the preset nearest to ``rgb``.
+
+    Edits ``new`` (an effects block) in place and touches only the sidelight
+    and halo bytes [12:20]; brightness is kept unless it is 0 and speed is left
+    alone. Returns the preset index (0-6).
+    """
+    color = _nearest_fixed_color(*rgb)
+    for index, fixed_mode in ((I_SIDELIGHT, SIDELIGHT_FIXED),
+                              (I_HALO, HALO_FIXED)):
+        new[index] = fixed_mode
+        new[index + 1] = color
+        if new[index + 2] == 0:  # brightness 0-4; speed is left as is
+            new[index + 2] = MISC_MID_BRIGHTNESS
+    return color
+
+
+def _apply_edge(board: _Board, rgb: bytes) -> bool:
+    """Read-modify-write ONLY the edge-light bytes (saved to flash!).
+
+    Returns True when something was written. Nothing is written when the edge
+    lights already show that preset. The original lighting is backed up before
+    the first write (an OSError aborts before anything is sent).
+    """
+    effects = board.read_effects()
+    new = bytearray(effects)
+    _set_edge_bytes(new, rgb)
+    if bytes(new) == effects:
+        return False
+    _ensure_backup(board, effects, board.read_colors())
+    board.write_effects(bytes(new), effects)
+    if board.read_effects() != bytes(new):
+        raise _ProtocolError("read-back of lighting block differs")
+    return True
 
 
 def _palette_row(colors: bytes, row: int) -> list[str]:
@@ -445,7 +559,21 @@ class NuPhyBackend(LightingBackend):
     def __init__(self) -> None:
         self.status = "not connected"
         self._boards: list[_Board] = []
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()      # board list + report 5/6 transactions
+        # Live state. _live_lock guards the report-8 handles and frame state;
+        # it is only ever taken after _lock (close), never the other way round,
+        # and render() takes only _live_lock, so a slow settings write on _lock
+        # never stalls the frame loop.
+        self._live_lock = threading.Lock()
+        self._clock = time.monotonic       # replaced in tests
+        self._live_active = False
+        self._live_error = False
+        self._last_base: RGB | None = None
+        self._set_color_rgb: RGB | None = None
+        self._edge_applied: int | None = None   # preset index last written
+        self._edge_last_attempt = -1e9
+        self._edge_thread: threading.Thread | None = None
+        self._edge_async = True            # tests set False for determinism
 
     # -- connection --------------------------------------------------------
     def connect(self) -> bool:
@@ -462,7 +590,7 @@ class NuPhyBackend(LightingBackend):
                 return False
             self._boards = boards
         if boards:
-            self.status = "connected"
+            self._refresh_live_support()
             return True
         if skipped:
             self.status = f"not found: unsupported NuPhy model ({skipped})"
@@ -506,12 +634,16 @@ class NuPhyBackend(LightingBackend):
                 if cmd_dev is None or data_dev is None:
                     raise _ProtocolError("feature reports 5/6 not found in "
                                          "HID descriptors (unsupported firmware?)")
+                live_dev = next((d for d, s in opened
+                                 if s.get(LIVE_REPORT_ID) == LIVE_REPORT_PAYLOAD),
+                                None)
                 for dev, _ in opened:  # release collections we do not use
-                    if dev is not cmd_dev and dev is not data_dev:
+                    if dev is not cmd_dev and dev is not data_dev \
+                            and dev is not live_dev:
                         dev.close()
                 firmware = _format_version(infos[0].get("release_number", 0))
                 boards.append(_Board(key, product, model, firmware,
-                                     cmd_dev, data_dev))
+                                     cmd_dev, data_dev, live_dev))
             except Exception:
                 for dev, _ in opened:
                     try:
@@ -556,6 +688,9 @@ class NuPhyBackend(LightingBackend):
             for board in self._boards:
                 try:
                     self._apply(board, rgb)
+                    self._set_color_rgb = (rgb[0], rgb[1], rgb[2])
+                    self._edge_applied = (_nearest_fixed_color(*rgb)
+                                          if SYNC_EDGE_LIGHTS else None)
                 except Exception as exc:
                     log.warning("NuPhy set_color failed: %s", exc)
                     failures.append(f"{board.product}: {exc}")
@@ -595,13 +730,7 @@ class NuPhyBackend(LightingBackend):
             new[off + 1] = MID_VALUE
 
         if SYNC_EDGE_LIGHTS:
-            color = _nearest_fixed_color(*rgb)
-            for index, fixed_mode in ((I_SIDELIGHT, SIDELIGHT_FIXED),
-                                      (I_HALO, HALO_FIXED)):
-                new[index] = fixed_mode
-                new[index + 1] = color
-                if new[index + 2] == 0:  # brightness 0-4; speed is left as is
-                    new[index + 2] = MISC_MID_BRIGHTNESS
+            color = _set_edge_bytes(new, rgb)
             log.info("edge lights use preset colors; closest to #%s is %s",
                      rgb.hex(), FIXED_COLORS[color][0])
         effects_changed = bytes(new) != effects
@@ -616,6 +745,133 @@ class NuPhyBackend(LightingBackend):
                 raise _ProtocolError("read-back of lighting block differs")
             if palette_changed and board.read_colors() != bytes(new_colors):
                 raise _ProtocolError("read-back of palette differs")
+
+    # -- live lighting -------------------------------------------------------
+    def _refresh_live_support(self) -> None:
+        """Set ``supports_live`` and the status line after (re)connecting."""
+        usable = [b for b in self._boards
+                  if b.live_dev is not None and b.model in KEY_SLOTS_BY_MODEL]
+        self.supports_live = bool(usable)
+        if usable:
+            self.status = "connected"
+            return
+        reasons = []
+        for b in self._boards:
+            if b.live_dev is None:
+                reasons.append(f"{b.model} has no live-frame report "
+                               f"(firmware {b.firmware})")
+            else:
+                reasons.append(f"no key map for {b.model} yet")
+        self.status = f"connected (live lighting unavailable: {'; '.join(reasons)})"
+
+    def start_live(self) -> None:
+        with self._live_lock:
+            self._live_active = True
+            self._live_error = False
+            for board in self._boards:
+                board.last_frame = None
+
+    def render(self, scene: Scene) -> None:
+        """Send one key-backlight frame; apply ``scene.edge`` if it changed.
+
+        Frames go over report 8 (RAM only). An identical frame is not resent
+        until ``LIVE_KEEPALIVE_S`` has passed. Never raises.
+        """
+        try:
+            now = self._clock()
+            base = _clamp_rgb(scene.base)
+            with self._live_lock:
+                if not self._live_active:
+                    return
+                self._last_base = base
+                for board in self._boards:
+                    slots = KEY_SLOTS_BY_MODEL.get(board.model)
+                    if board.live_dev is None or slots is None:
+                        continue
+                    frame = build_live_frame(base, scene.keys, slots)
+                    if (frame == board.last_frame
+                            and now - board.last_sent_t < LIVE_KEEPALIVE_S):
+                        continue
+                    try:
+                        board.send_frame(frame)
+                    except Exception as exc:
+                        board.last_frame = None  # retry next tick
+                        if not self._live_error:
+                            log.warning("NuPhy live frame failed: %s", exc)
+                        self._live_error = True
+                        self.status = f"error: live frame failed: {exc}"
+                        continue
+                    board.last_frame, board.last_sent_t = frame, now
+                    if self._live_error:
+                        self._live_error = False
+                        self.status = "connected"
+            self._maybe_apply_edge(scene.edge, now)
+        except Exception as exc:
+            log.warning("NuPhy render failed: %s", exc)
+            self.status = f"error: {exc}"
+
+    def _maybe_apply_edge(self, edge: RGB | None, now: float) -> None:
+        """Start an edge-light write if the wanted preset differs from the last
+        one written and at least ``EDGE_MIN_INTERVAL_S`` passed since the last
+        attempt. Failed attempts count too, so errors cannot cause a write storm.
+
+        The write (2 reads + 1 write + 1 read-back, 0.5 s or more) runs on a
+        one-at-a-time worker thread so the frame loop keeps its rate.
+        """
+        if edge is None or not SYNC_EDGE_LIGHTS:
+            return
+        rgb = bytes(_clamp_rgb(edge))
+        preset = _nearest_fixed_color(*rgb)
+        if preset == self._edge_applied:
+            return
+        if now - self._edge_last_attempt < EDGE_MIN_INTERVAL_S:
+            return
+        thread = self._edge_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._edge_last_attempt = now
+        if not self._edge_async:
+            self._edge_job(rgb, preset)
+            return
+        self._edge_thread = threading.Thread(
+            target=self._edge_job, args=(rgb, preset), daemon=True,
+            name="nuphy-edge")
+        self._edge_thread.start()
+
+    def _edge_job(self, rgb: bytes, preset: int) -> None:
+        with self._lock:  # serialises with set_color / restore on report 5/6
+            if not self._boards:
+                return
+            try:
+                for board in self._boards:
+                    _apply_edge(board, rgb)
+            except Exception as exc:
+                self._fail(exc)
+                return
+            self._edge_applied = preset
+        with self._live_lock:  # the write may have reset the board: resend
+            for board in self._boards:
+                board.last_frame = None
+
+    def stop_live(self) -> None:
+        """Send one last frame in the color from the last ``set_color`` (else the
+        last live base), then stop. Frames are RAM only, so without this the
+        keys would keep the final live frame."""
+        with self._live_lock:
+            if not self._live_active:
+                return
+            self._live_active = False
+            rgb = self._set_color_rgb or self._last_base
+            for board in self._boards:
+                board.last_frame = None
+                slots = KEY_SLOTS_BY_MODEL.get(board.model)
+                if rgb is None or board.live_dev is None or slots is None:
+                    continue
+                try:
+                    board.send_frame(build_live_frame(rgb, {}, slots))
+                except Exception as exc:
+                    log.warning("NuPhy final live frame failed: %s", exc)
+                    self.status = f"error: final live frame failed: {exc}"
 
     def restore(self) -> str:
         """Put the keyboard back as saved; stays connected (no reconnect)."""
@@ -664,8 +920,10 @@ class NuPhyBackend(LightingBackend):
 
     def _close_boards(self) -> None:
         boards, self._boards = self._boards, []
-        for board in boards:
-            board.close()
+        self.supports_live = False
+        with self._live_lock:  # wait for an in-flight frame send
+            for board in boards:
+                board.close()
 
     def close(self) -> None:
         with self._lock:

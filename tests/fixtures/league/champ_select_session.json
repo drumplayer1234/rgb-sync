@@ -1,0 +1,36 @@
+{
+  "localPlayerCellId": 2,
+  "myTeam": [
+    {
+      "cellId": 0,
+      "championId": 266,
+      "championPickIntent": 0,
+      "selectedSkinId": 266000,
+      "summonerId": 1
+    },
+    {
+      "cellId": 2,
+      "championId": 0,
+      "championPickIntent": 103,
+      "selectedSkinId": 103003,
+      "summonerId": 2
+    },
+    {
+      "cellId": 4,
+      "championId": 238,
+      "championPickIntent": 0,
+      "selectedSkinId": 238000,
+      "summonerId": 3
+    }
+  ],
+  "theirTeam": [
+    {
+      "cellId": 5,
+      "championId": 0,
+      "championPickIntent": 0
+    }
+  ],
+  "timer": {
+    "phase": "BAN_PICK"
+  }
+}
