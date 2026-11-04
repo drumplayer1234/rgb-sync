@@ -138,33 +138,46 @@ def test_clamping_and_wrong_types() -> None:
     rig = Rig()
     try:
         li = rig.listener
-        rig.send(state_msg(pct=250, best=-5, speed=99, pulse=7, bg=[300, -20, 12.6],
-                           p1=[0, 255, 256]))
+        rig.send(state_msg(pct=250, best=-5, speed=99, pulse=70, pulse2=-3, pulse3=9.5,
+                           bg=[300, -20, 12.6], p1=[0, 255, 256], accent=[300, -1, 7]))
         rig.settle(1, 0)
         st = li.state()
-        assert (st.pct, st.best, st.speed, st.pulse) == (100.0, 0.0, 10.0, 1.0)
+        # pulse* are raw 0-16 meters now (this used to clamp to 1.0)
+        assert (st.pct, st.best, st.speed, st.pulse) == (100.0, 0.0, 10.0, 16.0)
+        assert (st.pulse2, st.pulse3) == (0.0, 9.5) and st.accent == (255, 0, 7)
         assert st.bg == (255, 0, 13) and st.p1 == (0, 255, 255)
         # wrong types / shapes keep the previous value, never raise
         rig.send(state_msg(pct="lots", best=None, mode="hovercraft", flip="yes",
                            bg=[1, 2], p1="red", pulse=float("nan"), speed=True,
-                           practice=5, paused=[]))
+                           practice=5, paused=[], pulse2="x", pulse3=None,
+                           accent="red"))
         rig.settle(2, 0)
         st = li.state()
         assert st.pct == 100.0 and st.mode == "ship" and st.flip is True
         assert st.bg == (255, 0, 13) and st.p1 == (0, 255, 255)
-        assert st.pulse == 1.0 and st.speed == 10.0
+        assert st.pulse == 16.0 and st.speed == 10.0
+        assert (st.pulse2, st.pulse3, st.accent) == (0.0, 9.5, (255, 0, 7))
         assert st.practice is False and st.paused is False
+        for bad in ([1, 2], [1, 2, 3, 4], [1, 2, "x"], [1, None, 3], {"r": 1}, 5):
+            rig.send({"v": 1, "t": "state", "accent": bad})   # malformed accent: kept
+        rig.settle(8, 0)
+        assert li.state().accent == (255, 0, 7)
         # missing fields: only what is sent changes
         rig.send({"v": 1, "t": "state", "pct": 3})
-        rig.settle(3, 0)
+        rig.settle(9, 0)
         st = li.state()
         assert st.pct == 3.0 and st.mode == "ship" and st.bg == (255, 0, 13)
+        assert st.accent == (255, 0, 7)                  # absent: unchanged
+        # explicit null: nothing vivid right now
+        rig.send({"v": 1, "t": "state", "accent": None})
+        rig.settle(10, 0)
+        assert li.state().accent is None and li.state().bg == (255, 0, 13)
         # event details: clamped / defaulted
         rig.send({"v": 1, "t": "level_start", "name": "x" * 500, "stars": 99,
                   "difficulty": "IMPOSSIBLE", "platformer": 1})
         rig.send({"v": 1, "t": "death", "pct": 400})
         rig.send({"v": 1, "t": "death", "pct": "?", "new_best": "yes"})
-        rig.settle(6, 0)
+        rig.settle(13, 0)
         ev = li.drain_events()
         assert ev[0].detail["stars"] == 10 and ev[0].detail["difficulty"] == "unrated"
         assert len(ev[0].detail["name"]) <= 100 and ev[0].detail["platformer"] is True
@@ -172,6 +185,31 @@ def test_clamping_and_wrong_types() -> None:
         assert ev[2].detail == {"pct": 0.0, "new_best": False}
         # level_start resets progress for the new attempt
         assert li.state().pct == 0.0 and li.state().difficulty == "unrated"
+    finally:
+        rig.close()
+
+
+def test_old_format_messages_still_work() -> None:
+    rig = Rig()
+    try:
+        li = rig.listener
+        old = state_msg()                      # no pulse2 / pulse3 / accent at all
+        assert "accent" not in old and "pulse2" not in old
+        rig.send(old)
+        rig.settle(1, 0)
+        st = li.state()
+        assert st.connected and st.pulse == 0.5
+        assert st.pulse2 == 0.0 and st.pulse3 == 0.0 and st.accent is None
+        # new-format fields are read
+        rig.send(state_msg(pulse=12.5, pulse2=3.25, pulse3=1, accent=[10, 200, 255]))
+        rig.settle(2, 0)
+        st = li.state()
+        assert (st.pulse, st.pulse2, st.pulse3, st.accent) == (12.5, 3.25, 1.0, (10, 200, 255))
+        # level_exit forgets all of it
+        rig.send({"v": 1, "t": "level_exit"})
+        rig.settle(3, 0)
+        st = li.state()
+        assert st.accent is None and st.pulse == 0.0
     finally:
         rig.close()
 

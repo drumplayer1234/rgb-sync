@@ -9,7 +9,10 @@ complete with a new best.
   python -m rgbsync.gd.sim --print [--speed 4]   listener + effects, print scenes
   python -m rgbsync.gd.sim --send [--speed 1]    only send (to try the real app)
 
-No hardware and no game needed. A pass takes about 38 s at ``--speed 1``.
+The states look like a real recording: mostly black backgrounds with brief white
+flashes, the mod's ``accent`` color (null for a while), and raw 0-16 music meters
+with 2 Hz beat bursts. No hardware and no game needed. A pass takes about 38 s at
+``--speed 1``.
 """
 from __future__ import annotations
 
@@ -54,13 +57,53 @@ TIMELINE_EVENTS: list[tuple[float, dict[str, Any]]] = [
     (L2_START + L2_RUN_SECONDS, {"t": "complete", "new_best": True}),
 ]
 
-#: Background color keyframes per level: (seconds into the level, rgb).
+#: Background color per level, like a real recording: mostly black, some dark
+#: blue, and short white flashes. Piecewise constant: (seconds into the level, rgb).
 _BG1: list[tuple[float, RGB]] = [
-    (0.0, (20, 30, 110)), (2.0, (5, 8, 25)), (4.0, (10, 90, 130)),
-    (8.0, (90, 20, 120)), (12.0, (130, 20, 40)), (16.0, (20, 110, 60)),
-    (22.0, (20, 30, 110))]
-_BG2: list[tuple[float, RGB]] = [
-    (0.0, (15, 60, 20)), (3.0, (10, 90, 100)), (6.0, (140, 100, 10))]
+    (0.0, (0, 0, 0)), (6.0, (0, 3, 32)), (9.0, (0, 0, 0)), (15.0, (0, 3, 32)),
+    (18.0, (0, 0, 0))]
+_BG2: list[tuple[float, RGB]] = [(0.0, (0, 0, 0)), (4.0, (0, 3, 32))]
+#: Brief white flashes: (level seconds, length).
+_FLASHES1 = [(2.0, 0.15), (7.5, 0.2), (12.0, 0.15), (19.0, 0.2), (23.0, 0.15)]
+_FLASHES2 = [(1.5, 0.15), (4.5, 0.2)]
+
+#: The mod's "most active vivid color": keyframes (seconds, rgb) blended smoothly,
+#: with windows where nothing is vivid (null, the app falls back to the player color).
+_ACCENT1: list[tuple[float, RGB]] = [
+    (0.0, (255, 40, 60)), (4.0, (255, 120, 0)), (8.0, (0, 170, 255)),
+    (12.0, (170, 0, 255)), (16.0, (0, 255, 120)), (22.0, (255, 40, 60))]
+_ACCENT2: list[tuple[float, RGB]] = [
+    (0.0, (60, 255, 90)), (3.0, (0, 200, 255)), (6.0, (255, 170, 0))]
+_NO_ACCENT1 = [(10.0, 11.5), (24.0, 26.0)]
+_NO_ACCENT2: list[tuple[float, float]] = []
+
+BEAT_HZ = 2.0
+
+
+def _in_windows(windows, t: float) -> bool:
+    return any(a <= t < b for a, b in windows)
+
+
+def _step_keys(frames: list[tuple[float, RGB]], t: float) -> list[int]:
+    color = frames[0][1]
+    for start, c in frames:
+        if t >= start:
+            color = c
+    return list(color)
+
+
+def _bg_at(frames, flashes, t: float) -> list[int]:
+    if any(a <= t < a + length for a, length in flashes):
+        return [255, 255, 255]
+    return _step_keys(frames, t)
+
+
+def _beats(t: float) -> tuple[float, float, float]:
+    """Raw (pulse, pulse2, pulse3) like the game's meters: 2 Hz kick bursts that
+    rise to about 14, a quieter 4 Hz hat, and a third meter that is unavailable."""
+    kick = max(0.0, math.cos(2 * math.pi * BEAT_HZ * t)) ** 2
+    hat = max(0.0, math.cos(2 * math.pi * 2 * BEAT_HZ * t + 1.0)) ** 4
+    return round(0.6 + 13.4 * kick, 2), round(0.3 + 4.0 * hat, 2), 0.0
 
 
 def _lerp_keys(frames: list[tuple[float, RGB]], t: float) -> list[int]:
@@ -93,6 +136,7 @@ def state_at(t: float) -> dict[str, Any] | None:
     if L1_START <= t < 27.5:
         lt = t - L1_START
         practice = t >= PRACTICE[0]
+        p1, p2, p3 = _beats(t)
         if t < ATTEMPT1[0]:
             pct = 0.0
         elif t < ATTEMPT1[1]:
@@ -114,18 +158,21 @@ def state_at(t: float) -> dict[str, Any] | None:
         return {
             "pct": round(pct, 2), "best": best, "mode": _mode_at(_MODES1, t),
             "flip": 5.0 <= t < 6.5 or 13.0 <= t < 14.0,
-            "speed": 1.0, "bg": _lerp_keys(_BG1, lt), "p1": [255, 80, 200],
-            "pulse": round(max(0.0, math.cos(2 * math.pi * 2.0 * t)) ** 2, 3),
+            "speed": 1.0, "bg": _bg_at(_BG1, _FLASHES1, lt), "p1": [255, 80, 200],
+            "pulse": p1, "pulse2": p2, "pulse3": p3,
+            "accent": None if _in_windows(_NO_ACCENT1, lt) else _lerp_keys(_ACCENT1, lt),
             "practice": practice, "paused": 17.0 <= t < 17.8 and not practice,
         }
     if L2_START <= t < L2_START + L2_RUN_SECONDS:
         lt = t - L2_START
+        p1, p2, p3 = _beats(t)
         return {
             "pct": round(min(100.0, lt / (L2_RUN_SECONDS - 0.05) * 100.0), 2),
             "best": 0.0,
             "mode": _mode_at(_MODES2, lt), "flip": False, "speed": 1.0,
-            "bg": _lerp_keys(_BG2, lt), "p1": [80, 255, 160],
-            "pulse": round(max(0.0, math.cos(2 * math.pi * 2.0 * t)) ** 2, 3),
+            "bg": _bg_at(_BG2, _FLASHES2, lt), "p1": [80, 255, 160],
+            "pulse": p1, "pulse2": p2, "pulse3": p3,
+            "accent": None if _in_windows(_NO_ACCENT2, lt) else _lerp_keys(_ACCENT2, lt),
             "practice": False, "paused": False,
         }
     return None

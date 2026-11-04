@@ -4,7 +4,7 @@ The mod sends JSON datagrams to 127.0.0.1:47831, fire and forget. ``GDListener``
 runs a daemon thread that parses them into a ``GDState`` (latest values) and a
 queue of ``GDEvent``s. Anything malformed is ignored and counted, never raised:
 bad JSON, wrong protocol version, unknown message types. Out-of-range numbers are
-clamped; fields of the wrong type are skipped (the previous value stays).
+clamped (colors to 0-255, ``pulse*`` to 0-16); fields of the wrong type are skipped (the previous value stays).
 
 ``connected`` means a ``state`` message arrived within the last ``TIMEOUT``
 seconds (and no ``level_exit`` since). The clock is injectable for tests.
@@ -36,6 +36,9 @@ DIFFICULTIES = ("auto", "easy", "normal", "hard", "harder", "insane", "demon",
 EVENT_KINDS = ("level_start", "death", "restart", "complete", "checkpoint",
                "level_exit")
 
+#: Upper bound of the raw ``pulse`` / ``pulse2`` / ``pulse3`` meters.
+MAX_PULSE = 16.0
+
 _MAX_EVENTS = 256        # queued events kept if nobody drains them
 _MAX_NAME = 80
 _RECV_BYTES = 4096
@@ -53,7 +56,13 @@ class GDState:
     speed: float = 1.0
     bg: tuple[int, int, int] = (0, 0, 0)
     p1: tuple[int, int, int] = (255, 255, 255)
+    #: Raw music meters, 0-16 (unnormalized; old mods send 0-1 clamped).
     pulse: float = 0.0
+    pulse2: float = 0.0
+    pulse3: float = 0.0
+    #: The level's most active vivid color right now, None when nothing is vivid
+    #: (and for old mods that do not send it).
+    accent: tuple[int, int, int] | None = None
     practice: bool = False
     paused: bool = False
     # from the last level_start
@@ -284,9 +293,17 @@ class GDListener:
         speed = _num(msg.get("speed"), 0, 10)
         if speed is not None:
             st.speed = speed
-        pulse = _num(msg.get("pulse"), 0, 1)
-        if pulse is not None:
-            st.pulse = pulse
+        for key in ("pulse", "pulse2", "pulse3"):
+            meter = _num(msg.get(key), 0, MAX_PULSE)
+            if meter is not None:
+                setattr(st, key, meter)
+        if "accent" in msg:
+            if msg["accent"] is None:
+                st.accent = None                  # explicit null: nothing vivid
+            else:
+                accent = _rgb(msg["accent"])
+                if accent is not None:
+                    st.accent = accent
         for key in ("bg", "p1"):
             color = _rgb(msg.get(key))
             if color is not None:

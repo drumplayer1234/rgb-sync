@@ -40,7 +40,7 @@ python main.py
 
 Turns the lights into part of the game. Tick **Geometry Dash mode** in the app and, while you play, the lights follow the level:
 
-- The background color of the level, brightened so dark levels still show, pulsing with the music.
+- The level's color: the most active vivid color the mod sees in the level (falling back to the background if it is vivid, then to your player color), shown rich and fairly dark, and punching to full brightness on every beat of the music. Black and white backgrounds are not colors, so they never turn the lights grey.
 - On a keyboard with live lighting (NuPhy Halo65): a progress bar across the keys in your player color, a white marker at your best percent, and WASD / arrows / space colored by the current game mode (cube, ship, wave, ...). Gravity flips fill the bar from the right.
 - Death bursts (gold on a new best), a rainbow sweep when you complete a level, green for practice mode (with a flash on every checkpoint), dimmed lights when paused.
 - The NuPhy side lights and halo show the level's difficulty. They are a slow saved setting, so they change once per level.

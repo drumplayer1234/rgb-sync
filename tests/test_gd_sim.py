@@ -45,7 +45,23 @@ def test_script_is_consistent() -> None:
         st = sim.state_at(t)
         assert st is not None
         assert all(0 <= c <= 255 for c in st["bg"] + st["p1"])
-        assert 0 <= st["pulse"] <= 1 and 0 <= st["pct"] <= 100
+        assert 0 <= st["pulse"] <= 16 and 0 <= st["pct"] <= 100   # raw meters, not 0-1
+        assert 0 <= st["pulse2"] <= 16 and 0 <= st["pulse3"] <= 16
+        assert st["accent"] is None or all(0 <= c <= 255 for c in st["accent"])
+    # like the real recording: black backgrounds most of the time, some white flashes
+    ts = [i / 30 for i in range(30 * 27)]
+    bgs = [tuple(sim.state_at(t)["bg"]) for t in ts]
+    assert bgs.count((0, 0, 0)) / len(bgs) > 0.5 and (255, 255, 255) in bgs
+    assert max(max(b) for b in bgs if b != (255, 255, 255)) <= 32
+    # accent: mostly vivid colors, null for a while (the app falls back to p1)
+    accents = [sim.state_at(t)["accent"] for t in ts]
+    assert None in accents and sum(a is not None for a in accents) > len(accents) / 2
+    # real beat shapes: the raw pulse swings between ~0.6 and ~14 at 2 Hz
+    pulses = [sim.state_at(t)["pulse"] for t in ts[:90]]
+    assert min(pulses) < 1.0 and max(pulses) > 12.0
+    rises = sum(1 for a, b in zip(pulses, pulses[1:]) if a < 7 <= b)
+    assert 5 <= rises <= 7, rises          # 3 s at 2 Hz
+    assert {sim.state_at(t)["pulse3"] for t in ts[:90]} == {0.0}
 
 
 def test_sender_through_real_listener() -> None:
