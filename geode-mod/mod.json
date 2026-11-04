@@ -1,0 +1,11 @@
+{
+	"geode": "v6.0.0-alpha.1",
+	"gd": {
+		"win": "2.2091"
+	},
+	"id": "drumplayer1234.rgb-sync",
+	"name": "RGB Sync",
+	"version": "v1.0.0",
+	"developer": "drumplayer1234",
+	"description": "Reports level progress, deaths and music pulse to the RGB Sync desktop app over local UDP so your keyboard lights can follow the game."
+}

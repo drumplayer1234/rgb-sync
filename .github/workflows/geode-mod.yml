@@ -1,0 +1,39 @@
+name: geode-mod
+
+on:
+  push:
+    paths:
+      - "geode-mod/**"
+      - ".github/workflows/geode-mod.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build RGB Sync (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the mod
+        id: build
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          path: geode-mod
+          # Geometry Dash 2.2091 needs the Geode 6 alpha; keep in sync with "geode" in mod.json.
+          sdk: v6.0.0-alpha.1
+          # Geode 6 needs CLI 4.0.0 or newer. Pinned so a new CLI release cannot break the build.
+          cli: v4.0.0
+          # Bindings repo commit that was the latest when v6.0.0-alpha.1 was tagged.
+          # The default (main) moves on and may need a newer SDK than the alpha.
+          bindings-ref: 4e6c6d24b09502337f22c9db2aadb371fe7ee8ba
+          target: Win64
+
+      - name: Upload the .geode file
+        uses: actions/upload-artifact@v7
+        with:
+          name: rgb-sync-geode
+          path: ${{ steps.build.outputs.build-output }}/*.geode
+          if-no-files-found: error
