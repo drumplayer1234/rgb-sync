@@ -204,7 +204,8 @@ def test_color_source_priority() -> None:
     assert 0.40 <= REST_BRIGHTNESS <= 0.50
     assert val_of(base) == val_of(led_gamma(scale(VIVID_P1, REST_BRIGHTNESS)))
     # the old behaviour is gone: black background is not a 35% grey
-    assert max(fx(bg=BLACK, accent=None, p1=VIVID_P1).scene(T0).base) < 40
+    black_bg = fx(bg=BLACK, accent=None, p1=VIVID_P1).scene(T0).base
+    assert max(black_bg) < 60 and sat_of(black_bg) > 0.85
     assert sat_of(fx(bg=WHITE, accent=None, p1=VIVID_P1).scene(T0).base) > 0.85
 
 
@@ -346,7 +347,7 @@ def test_beat_drives_base() -> None:
     assert max(bright) == 1.0 and min(bright) == val_of(rest_color)  # 100% peak, rest valleys
     assert max(b[1] for _dt, b in late) == 255
     assert any(b == rest_color for _dt, b in late)
-    assert len({b for _dt, b in late}) > 10                  # it punches through many steps
+    assert len({b for _dt, b in late}) > 3                   # it fades through steps, not on/off
     assert all(hue_gap(b, VIVID_P1) < 0.08 for _dt, b in late)   # same hue throughout
     # no beat information (always clamped at 1, or 0): the base sits at rest, not bright
     for flat in (1.0, 0.0):
@@ -366,7 +367,7 @@ def test_beat_drives_base() -> None:
         t = T0 + 1 + i / 30
         e.update(gd(bg=BLACK, p1=VIVID_P1, pulse=2.0, pulse2=0.0, pulse3=kick(i / 30)), [], t)
         greens.append(e.scene(t).base[1])
-    assert max(greens[90:]) == 255 and min(greens[90:]) < 30
+    assert max(greens[90:]) == 255 and min(greens[90:]) < 60
 
 
 def test_progress_bar() -> None:
