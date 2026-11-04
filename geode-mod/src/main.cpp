@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <string>
 
 using namespace geode::prelude;
@@ -142,6 +143,135 @@ namespace rgb {
         return !pl->m_isPlatformer && !pl->m_isTestMode && percent > bestOf(pl);
     }
 
+    // ---- accent color -----------------------------------------------------
+    //
+    // "The level's most active vivid color right now." Channel 1000 (background) is
+    // often black or static, so this looks at every color channel the level uses.
+    // Read-only: it only calls GJEffectManager::colorExists / activeColorForIndex,
+    // which are plain lookups, and it runs at about 12 Hz with the result reused
+    // between scans.
+
+    constexpr int kAccentSlots = 1010;   // channel ids 0..1009 index the arrays below
+    constexpr size_t kColorSlots = 1102; // GJEffectManager keeps color slots 0..1101
+    constexpr auto kAccentScanInterval = std::chrono::milliseconds(80); // about 12.5 Hz
+    constexpr auto kAccentRecent = std::chrono::milliseconds(1500);
+    constexpr float kVividMin = 0.35f;    // saturation x value below this never counts
+    constexpr float kSwitchMargin = 0.1f; // a challenger must beat the current pick by this
+    constexpr int kChangeDelta = 8;       // RGB component move that counts as "changed"
+
+    ccColor3B g_prevColor[kAccentSlots];
+    bool g_prevValid[kAccentSlots];
+    bool g_everChanged[kAccentSlots];
+    Clock::time_point g_changedAt[kAccentSlots];
+    Clock::time_point g_lastAccentScan{};
+    int g_accentChannel = -1; // -1: nothing vivid
+    ccColor3B g_accentColor{0, 0, 0};
+
+    // Called from PlayLayer::init (a new level load), not on every attempt.
+    void resetAccent() {
+        for (int i = 0; i < kAccentSlots; ++i) {
+            g_prevColor[i] = ccColor3B{0, 0, 0};
+            g_prevValid[i] = false;
+            g_everChanged[i] = false;
+            g_changedAt[i] = Clock::time_point{};
+        }
+        g_lastAccentScan = Clock::time_point{};
+        g_accentChannel = -1;
+        g_accentColor = ccColor3B{0, 0, 0};
+    }
+
+    // Saturation x value (HSV), 0-1. Black, grey and white score 0 or low.
+    float vividness(ccColor3B c) {
+        int mx = std::max({int(c.r), int(c.g), int(c.b)});
+        int mn = std::min({int(c.r), int(c.g), int(c.b)});
+        if (mx == 0) return 0.f;
+        float saturation = float(mx - mn) / float(mx);
+        float value = float(mx) / 255.f;
+        return saturation * value;
+    }
+
+    bool moved(ccColor3B a, ccColor3B b) {
+        return std::abs(int(a.r) - int(b.r)) >= kChangeDelta ||
+               std::abs(int(a.g) - int(b.g)) >= kChangeDelta ||
+               std::abs(int(a.b) - int(b.b)) >= kChangeDelta;
+    }
+
+    // Channels worth looking at: 1..999 (user channels) plus the drawn special ones:
+    // 1000 BG, 1001 ground, 1002 line, 1003 3DL, 1004 object, 1009 ground 2.
+    // Skipped: 0 (white), 1005/1006 (player colors), 1007/1008 (derived), 1010/1011 (fixed).
+    bool scanned(int ch) {
+        return (ch >= 1 && ch <= 1004) || ch == 1009;
+    }
+
+    void scanAccent(GJEffectManager* em, Clock::time_point now) {
+        // Without the "which channels exist" table, report nothing rather than guess.
+        if (!em || em->m_colorActionVector.size() < kColorSlots) {
+            g_accentChannel = -1;
+            return;
+        }
+
+        int recentCh = -1; // changed within 1.5 s: most recent change, then highest score
+        float recentScore = 0.f;
+        Clock::time_point recentAt{};
+        ccColor3B recentColor{0, 0, 0};
+        int bestCh = -1; // highest vivid score overall
+        float bestScore = 0.f;
+        ccColor3B bestColor{0, 0, 0};
+        float currentScore = -1.f; // the current choice, if it is still vivid
+        ccColor3B currentColor{0, 0, 0};
+
+        for (int ch = 1; ch <= 1009; ++ch) {
+            if (!scanned(ch)) continue;
+            if (!em->colorExists(ch)) { // unused channel: nothing to read
+                g_prevValid[ch] = false;
+                continue;
+            }
+            ccColor3B c = em->activeColorForIndex(ch);
+
+            if (g_prevValid[ch] && moved(c, g_prevColor[ch])) {
+                g_changedAt[ch] = now;
+                g_everChanged[ch] = true;
+            }
+            g_prevColor[ch] = c;
+            g_prevValid[ch] = true;
+
+            float score = vividness(c);
+            if (score < kVividMin) continue;
+
+            if (ch == g_accentChannel) {
+                currentScore = score;
+                currentColor = c;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                bestCh = ch;
+                bestColor = c;
+            }
+            if (g_everChanged[ch] && now - g_changedAt[ch] <= kAccentRecent) {
+                bool better = recentCh < 0 || g_changedAt[ch] > recentAt ||
+                              (g_changedAt[ch] == recentAt && score > recentScore);
+                if (better) {
+                    recentCh = ch;
+                    recentScore = score;
+                    recentAt = g_changedAt[ch];
+                    recentColor = c;
+                }
+            }
+        }
+
+        if (recentCh >= 0) {
+            g_accentChannel = recentCh;
+            g_accentColor = recentColor;
+        } else if (bestCh < 0) {
+            g_accentChannel = -1; // nothing vivid
+        } else if (currentScore >= 0.f && bestScore <= currentScore + kSwitchMargin) {
+            g_accentColor = currentColor; // stay on the current choice, with its fresh color
+        } else {
+            g_accentChannel = bestCh;
+            g_accentColor = bestColor;
+        }
+    }
+
     // `paused` is passed in because the pause menu has its own tick (see RgbPauseLayer).
     void sendState(PlayLayer* pl, bool paused) {
         auto p1 = pl->m_player1; // dual mode: report player 1
@@ -155,10 +285,24 @@ namespace rgb {
         ccColor3B bg{0, 0, 0};
         if (pl->m_effectManager) bg = pl->m_effectManager->activeColorForIndex(1000);
 
-        // Music level used by GD's pulse triggers; only updated while metering is on.
-        float pulse = 0.f;
+        // Music levels used by GD's pulse triggers; only updated while metering is on.
+        // Sent raw (the app auto-scales them), limited to 0-16 for safety.
+        float pulse = 0.f, pulse2 = 0.f, pulse3 = 0.f;
         if (auto audio = FMODAudioEngine::get(); audio && audio->m_metering) {
-            pulse = std::clamp(finite(audio->m_pulse1), 0.f, 1.f);
+            pulse = std::clamp(finite(audio->m_pulse1), 0.f, 16.f);
+            pulse2 = std::clamp(finite(audio->m_pulse2), 0.f, 16.f);
+            pulse3 = std::clamp(finite(audio->m_pulse3), 0.f, 16.f);
+        }
+
+        // Accent color: rescanned about 12 times a second, reused in between.
+        if (now - g_lastAccentScan >= kAccentScanInterval) {
+            g_lastAccentScan = now;
+            scanAccent(pl->m_effectManager, now);
+        }
+        std::string accent = "null";
+        if (g_accentChannel >= 0) {
+            accent = fmt::format("[{},{},{}]", int(g_accentColor.r), int(g_accentColor.g),
+                                 int(g_accentColor.b));
         }
 
         float speed = p1->m_playerSpeed > 0.f ? p1->m_playerSpeed : 1.f;
@@ -166,10 +310,11 @@ namespace rgb {
 
         post(fmt::format(
             R"({{"v":1,"t":"state","pct":{:.1f},"best":{:.1f},"mode":"{}","flip":{},"speed":{:.2f},)"
-            R"("bg":[{},{},{}],"p1":[{},{},{}],"pulse":{:.2f},"practice":{},"paused":{}}})",
+            R"("bg":[{},{},{}],"p1":[{},{},{}],"accent":{},"pulse":{:.3f},"pulse2":{:.3f},"pulse3":{:.3f},)"
+            R"("practice":{},"paused":{}}})",
             percentOf(pl), static_cast<float>(bestOf(pl)), modeOf(p1), tf(p1->m_isUpsideDown), finite(speed),
-            int(bg.r), int(bg.g), int(bg.b), int(c.r), int(c.g), int(c.b),
-            pulse, tf(pl->m_isPracticeMode), tf(paused)));
+            int(bg.r), int(bg.g), int(bg.b), int(c.r), int(c.g), int(c.b), accent,
+            pulse, pulse2, pulse3, tf(pl->m_isPracticeMode), tf(paused)));
     }
 }
 
@@ -178,6 +323,7 @@ class $modify(RgbPlayLayer, PlayLayer) {
         if (!PlayLayer::init(level, dontCreateObjects)) return false;
         rgb::g_deathSent = false;
         rgb::g_completeSent = false;
+        rgb::resetAccent();
         if (level) {
             rgb::sendEvent("level_start", fmt::format(
                 R"(,"name":"{}","stars":{},"difficulty":"{}","platformer":{})",
