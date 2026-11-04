@@ -14,10 +14,11 @@ sys.path.insert(0, str(ROOT))
 
 from rgbsync.gd.beat import BeatTracker  # noqa: E402
 from rgbsync.gd.effects import (  # noqa: E402
-    ACCENT_KEYS, CHECKPOINT_GREEN, EDGE_COLORS, GOLD, KEY_COLUMN, MAX_COLUMN,
-    MODE_COLORS, PRACTICE_GREEN, REST_BRIGHTNESS, GDEffects, boost_player,
-    led_gamma, saturate, scale, vividness)
+    ACCENT_KEYS, BEAT_STRENGTH, CHECKPOINT_GREEN, EDGE_COLORS, GOLD, KEY_COLUMN,
+    MAX_COLUMN, MODE_COLORS, PRACTICE_GREEN, REST_BRIGHTNESS, GDEffects, boost_player,
+    led_gamma, lift, saturate, scale, vividness)
 from rgbsync.gd.listener import GDEvent, GDState  # noqa: E402
+from rgbsync.gd.stabilizer import ColorStabilizer, hue_distance  # noqa: E402
 from rgbsync.scene import KEY_NAMES  # noqa: E402
 
 IDLE = (12, 34, 56)
@@ -77,9 +78,11 @@ def level_color(c):
     return tuple(int(round(x * 255)) for x in colorsys.hsv_to_rgb(h, max(s_, 0.85), 1.0))
 
 
-def lit(c, beat: float = 0.0):
-    """Final (post-gamma) base color for source ``c`` at the given beat level."""
-    return led_gamma(scale(level_color(c), REST_BRIGHTNESS + (1 - REST_BRIGHTNESS) * beat))
+def lit(c, beat: float = 0.0, strength: float = BEAT_STRENGTH):
+    """Final (post-gamma) base color for source ``c`` at the given beat level
+    (0-1) and Beat flash strength."""
+    return led_gamma(scale(level_color(c),
+                           REST_BRIGHTNESS + (1 - REST_BRIGHTNESS) * beat * strength))
 
 
 #: Progress bar color as it reaches the LEDs (player color boosted, enriched, gamma).
@@ -218,29 +221,191 @@ def test_never_a_grey_wash() -> None:
             assert s.base[1] >= s.base[0] and s.base[1] > s.base[2], (bg, s.base)
 
 
-def test_color_smoothing_and_snap() -> None:
-    a, b = (0, 255, 0), (0, 255, 120)         # 28 degrees apart: smoothed, but fast
+def feed(e: GDEffects, t0: float, seconds: float, hz: int = 30, **kw):
+    """Hold ``kw`` as the state for ``seconds``; yields (t - t0, Scene)."""
+    for i in range(int(round(seconds * hz)) + 1):
+        t = t0 + i / hz
+        e.update(gd(**kw), [], t)
+        yield t - t0, e.scene(t)
+
+
+def close(a, b, tol: int = 2) -> bool:
+    return max(abs(x - y) for x, y in zip(a, b)) <= tol
+
+
+def test_color_changes_are_stabilized() -> None:
+    """Deliberate change: the old 0.05 s smoothing and the instant snap on hue moves
+    over 30 degrees are gone; see ColorStabilizer."""
+    red, blue = (255, 0, 0), (0, 120, 255)
+    e = fx(accent=red)
+    assert e.scene(T0).base == lit(red)                     # the first color: at once
+    list(feed(e, T0, 1.5, accent=red))
+    # a short trigger of another color (0.1 s) never reaches the lights
+    seen = {s.base for _dt, s in feed(e, T0 + 2, 0.1, accent=blue)}
+    seen |= {s.base for _dt, s in feed(e, T0 + 2.1, 1.0, accent=red)}
+    assert seen == {lit(red)}, seen
+    # a held change is not shown at once, and is complete within about 0.7 s
+    frames = list(feed(e, T0 + 4.0, 1.5, accent=blue))
+    first_move = next(dt for dt, s in frames if s.base != lit(red))
+    done = next(dt for dt, s in frames if close(s.base, lit(blue)))
+    assert 0.25 <= first_move <= 0.5 and 0.5 <= done <= 0.75, (first_move, done)
+    assert len({s.base for dt, s in frames if 0 < dt < done}) >= 4   # a crossfade
+    # fast alternation (the accent flickering 2.5 times a second): the color stays put
+    e = fx(accent=red)
+    bases = set()
+    for i in range(150):
+        t = T0 + 10 + i / 30
+        e.update(gd(accent=blue if (i // 6) % 2 else red), [], t)
+        bases.add(e.scene(t).base)
+    assert bases == {lit(red)}
+    # small hue moves (under 25 degrees) track at once, with no hold or wait
+    a, b = (0, 255, 0), (0, 255, 85)                       # 20 degrees
     e = fx(accent=a)
-    assert e.scene(T0).base == lit(a)
-    e.scene(T0 + 1)                                  # frames are drawn continuously
-    e.update(gd(accent=b), [], T0 + 1)
-    assert e.scene(T0 + 1).base == lit(a)            # same instant: nothing moved yet
-    mid = e.scene(T0 + 1.012).base
+    e.update(gd(accent=a), [], T0 + 4.97)
+    e.scene(T0 + 4.97)
+    e.update(gd(accent=b), [], T0 + 5)
+    mid = e.scene(T0 + 5).base
     assert lit(a)[2] < mid[2] < lit(b)[2], (mid, lit(a), lit(b))
-    end = e.scene(T0 + 1.3).base                     # settled in a fraction of a second
-    assert max(abs(x - y) for x, y in zip(end, lit(b))) <= 1
-    # a big hue move (> 30 degrees) is instant: the color trigger hits the lights at once
-    e.update(gd(accent=(0, 120, 255)), [], T0 + 2)
-    assert e.scene(T0 + 2).base == lit((0, 120, 255))
-    e.update(gd(accent=(255, 0, 0)), [], T0 + 2.033)
-    assert e.scene(T0 + 2.033).base == lit((255, 0, 0))
-    # the source changing (accent -> player color) to another hue snaps as well
-    e.update(gd(accent=None, bg=BLACK, p1=VIVID_P1), [], T0 + 2.066)
-    assert e.scene(T0 + 2.066).base == lit(VIVID_P1)
-    # reconnecting snaps to the level color (no fade from the old one)
-    e.update(gd(connected=False), [], T0 + 3)
-    e.update(gd(accent=(40, 255, 0)), [], T0 + 4)
-    assert e.scene(T0 + 4).base == lit((40, 255, 0))
+    assert close(e.scene(T0 + 5.6).base, lit(b), 1)
+    # a level start sets the new color at once, with no fade ...
+    e.update(gd(accent=red), [ev("level_start", difficulty="hard")], T0 + 6)
+    assert e.scene(T0 + 6).base == lit(red)
+    # ... and so does a reconnect
+    e.update(gd(connected=False), [], T0 + 7)
+    e.update(gd(accent=(40, 255, 0)), [], T0 + 8)
+    assert e.scene(T0 + 8).base == lit((40, 255, 0))
+    # a source switch (accent -> player color) to another hue is gated like any change
+    e = fx(accent=red)
+    e.scene(T0)
+    frames = list(feed(e, T0 + 1, 1.2, accent=None, bg=BLACK, p1=VIVID_P1))
+    assert frames[0][1].base == lit(red) and frames[-1][1].base == lit(VIVID_P1)
+
+
+def test_neutral_fallback_is_gated_too() -> None:
+    quiet = dict(bg=BLACK, accent=None, p1=WHITE)           # nothing has a hue
+    e = fx(**quiet)
+    dim = e.scene(T0).base
+    assert dim[0] == dim[1] == dim[2]
+    # a vivid accent appearing for 0.1 s does not flash the lights
+    blip = {s.base for _dt, s in feed(e, T0 + 1, 0.1, bg=BLACK, accent=(255, 0, 0), p1=WHITE)}
+    blip |= {s.base for _dt, s in feed(e, T0 + 1.2, 0.5, **quiet)}
+    assert blip == {dim}
+    # ... but a held one fades in
+    frames = list(feed(e, T0 + 2, 1.2, bg=BLACK, accent=(255, 0, 0), p1=WHITE))
+    assert frames[0][1].base == dim and frames[-1][1].base == lit((255, 0, 0))
+
+
+# ------------------------------------------------------------ color stabilizer
+RED_F, BLUE_F, GREEN_F = (255.0, 0.0, 0.0), (0.0, 120.0, 255.0), (0.0, 255.0, 0.0)
+RED_H, BLUE_H, GREEN_H = 0.0, 0.5784, 1 / 3
+
+
+def hsv_hue(c) -> float:
+    return colorsys.rgb_to_hsv(*(x / 255 for x in c))[0]
+
+
+def run_stab(st: ColorStabilizer, t0: float, seconds: float, color, hue, hz: int = 30):
+    out = []
+    for i in range(int(round(seconds * hz)) + 1):
+        t = t0 + i / hz
+        out.append((t - t0, st.update(color, hue, t)))
+    return out
+
+
+def test_stabilizer_ignores_short_blips() -> None:
+    st = ColorStabilizer()
+    run_stab(st, 0.0, 2.0, RED_F, RED_H)
+    t = 2.0 + 1 / 30
+    for blip in (1 / 30, 0.1, 0.2, 0.28):
+        out = run_stab(st, t, blip, BLUE_F, BLUE_H)
+        t += blip + 1 / 30
+        out += run_stab(st, t, 1.0, RED_F, RED_H)
+        t += 1.0 + 1 / 30
+        assert all(c == RED_F for _dt, c in out), blip
+    assert st.changes == 0
+
+
+def test_stabilizer_adopts_held_change_and_crossfades() -> None:
+    st = ColorStabilizer()
+    run_stab(st, 0.0, 2.0, RED_F, RED_H)
+    out = run_stab(st, 3.0, 1.5, BLUE_F, BLUE_H)
+    # nothing for 0.3 s, then a fade of about 0.35 s: all done within 0.7 s
+    assert all(c == RED_F for dt, c in out if dt < 0.3)
+    done = next(dt for dt, c in out if c == BLUE_F)
+    assert 0.6 <= done <= 0.7, done
+    mids = [c for dt, c in out if 0.3 < dt < done]
+    assert len(mids) >= 6
+    # intermediate values are plain RGB blends of the two colors, moving one way
+    for c in mids:
+        assert 0 < c[0] < 255 and abs((255 - c[0]) / 255 - c[1] / 120) < 1e-6
+        assert abs((255 - c[0]) / 255 - c[2] / 255) < 1e-6
+    assert all(a[0] > b[0] and a[2] < b[2] for a, b in zip(mids, mids[1:]))
+    assert st.changes == 1
+    # hold: a second big change right after the first waits until 1.0 s have passed
+    st = ColorStabilizer()
+    run_stab(st, 0.0, 2.0, RED_F, RED_H)
+    run_stab(st, 3.0, 0.8, BLUE_F, BLUE_H)                  # adopted at 3.3, fade done
+    t_green = 3.0 + 0.8 + 1 / 30
+    out = run_stab(st, t_green, 2.0, GREEN_F, GREEN_H)
+    first = next(t_green + dt for dt, c in out if c != BLUE_F)
+    assert 4.3 <= first <= 4.45, first
+    assert st.changes == 2
+
+
+def test_stabilizer_alternation_changes_at_most_once_a_second() -> None:
+    for half_period in (0.1, 0.2, 0.25, 0.3, 0.5, 0.7, 1.0):
+        st = ColorStabilizer()
+        seconds = 30.0
+        adopted = []
+        last = 0
+        for i in range(int(seconds * 30)):
+            t = i / 30
+            color, hue = (RED_F, RED_H) if int(t / half_period) % 2 == 0 else (BLUE_F, BLUE_H)
+            st.update(color, hue, t)
+            if st.changes != last:
+                adopted.append(t)
+                last = st.changes
+        gaps = [b - a for a, b in zip(adopted, adopted[1:])]
+        assert all(g >= 1.0 - 1e-6 for g in gaps), (half_period, gaps)
+        assert len(adopted) <= seconds + 1, (half_period, len(adopted))
+        if half_period <= 0.25:
+            assert not adopted, (half_period, adopted)      # never lasts 0.3 s
+
+
+def test_stabilizer_small_changes_track_smoothly() -> None:
+    a, b = (255.0, 0.0, 0.0), (255.0, 90.0, 0.0)            # about 21 degrees apart
+    assert hue_distance(hsv_hue(a), hsv_hue(b)) < 25
+    st = ColorStabilizer()
+    run_stab(st, 0.0, 1.0, a, hsv_hue(a))
+    out = run_stab(st, 1.0 + 1 / 30, 1.0, b, hsv_hue(b))
+    greens = [c[1] for _dt, c in out]
+    assert 0 < greens[0] < 90 and greens == sorted(greens)   # moving right away, smoothly
+    assert abs(greens[-1] - 90) < 1.5                        # settled within a second
+    # no hold and no wait: change after change all follow
+    t = 3.0
+    for k in range(6):
+        c = (255.0, 30.0 * (k % 2), 0.0)
+        o = run_stab(st, t, 0.2, c, hsv_hue(c))
+        t += 0.2 + 1 / 30
+        assert o[-1][1][1] != o[0][1][1]
+    assert st.changes == 0
+
+
+def test_stabilizer_reset_and_clock() -> None:
+    st = ColorStabilizer()
+    assert st.update(RED_F, RED_H, 100.0) == RED_F          # first color: immediate
+    run_stab(st, 100.0 + 1 / 30, 3.0, RED_F, RED_H)
+    st.reset()
+    assert st.update(BLUE_F, BLUE_H, 105.0) == BLUE_F       # no fade after reset
+    assert st.changes == 0
+    # the first color starts no hold: a real change right after is adopted in ~0.3 s
+    out = run_stab(st, 105.0 + 1 / 30, 1.0, GREEN_F, GREEN_H)
+    assert 0.25 <= next(dt for dt, c in out if c != BLUE_F) <= 0.45
+    # a clock that jumps back starts over instead of raising or freezing
+    assert st.update(RED_F, RED_H, 0.0) == RED_F
+    # None (no hue) is far from every hue, and no change from itself
+    assert hue_distance(None, None) == 0.0 and hue_distance(None, 0.3) == 180.0
+    assert abs(hue_distance(0.95, 0.05) - 36.0) < 1e-6
 
 
 # ----------------------------------------------------------------- beat tracker
@@ -283,6 +448,9 @@ def test_beat_tracker_flat_and_scaling() -> None:
     for i in range(30 * 10):
         top = max(top, bt.update((8.0 + 0.01 * (i % 3), 0.0, 0.0), i / 30))
     assert top == 0.0
+    # (the same on the soft tracker the app uses)
+    bt = BeatTracker(decay=0.35, attack=0.06, max_per_second=4)
+    assert all(bt.update((1.0, 1.0, 1.0), i / 30) == 0.0 for i in range(300)) and bt.onsets == 0
     # auto-scale: the same rhythm at any amplitude still peaks near 1
     for amp in (0.05, 1.0, 14.0):
         bt = BeatTracker()
@@ -338,14 +506,17 @@ def test_beat_tracker_attack_decay_and_channels() -> None:
 
 
 def test_beat_drives_base() -> None:
+    """Deliberate change: a beat lifts the base by beat_strength (0.3) of the way to
+    full brightness, not to 100%."""
     e = fx(bg=BLACK, accent=None, p1=VIVID_P1)
     rest_color, peak_color = lit(VIVID_P1, 0.0), lit(VIVID_P1, 1.0)
-    assert peak_color == led_gamma(VIVID_P1) == (53, 255, 0)
+    assert led_gamma(VIVID_P1) == (53, 255, 0) and peak_color != (53, 255, 0)
     frames = [(dt, s.base) for dt, s in play(e, T0 + 1, 6.0, bg=BLACK, p1=VIVID_P1)]
     late = [(dt, b) for dt, b in frames if dt >= 3.0]
     bright = [val_of(b) for _dt, b in late]
-    assert max(bright) == 1.0 and min(bright) == val_of(rest_color)  # 100% peak, rest valleys
-    assert max(b[1] for _dt, b in late) == 255
+    assert min(bright) == val_of(rest_color)                 # rest valleys
+    assert 0.9 * val_of(peak_color) <= max(bright) <= val_of(peak_color)   # a swell ...
+    assert max(bright) < 0.5 and max(bright) > 1.5 * min(bright)           # ... not 100%
     assert any(b == rest_color for _dt, b in late)
     assert len({b for _dt, b in late}) > 3                   # it fades through steps, not on/off
     assert all(hue_gap(b, VIVID_P1) < 0.08 for _dt, b in late)   # same hue throughout
@@ -367,7 +538,113 @@ def test_beat_drives_base() -> None:
         t = T0 + 1 + i / 30
         e.update(gd(bg=BLACK, p1=VIVID_P1, pulse=2.0, pulse2=0.0, pulse3=kick(i / 30)), [], t)
         greens.append(e.scene(t).base[1])
-    assert max(greens[90:]) == 255 and min(greens[90:]) < 60
+    assert max(greens[90:]) > 1.5 * min(greens[90:]) and max(greens[90:]) < 130
+
+
+def swing(frames) -> tuple[float, float]:
+    """(rest, peak) brightness over the second half of (dt, base) frames."""
+    vals = [val_of(b) for _dt, b in frames[len(frames) // 2:]]
+    return min(vals), max(vals)
+
+
+def test_beat_strength() -> None:
+    assert GDEffects().beat_strength == BEAT_STRENGTH == 0.3
+    assert GDEffects(beat_strength=0.8).beat_strength == 0.8
+    rest = lit(VIVID_P1)
+    quiet = dict(bg=BLACK, accent=None, p1=VIVID_P1)
+
+    def bases(e, seconds=6.0, **kw):
+        return [(dt, s.base) for dt, s in play(e, T0 + 1, seconds, **quiet, **kw)]
+
+    # 0 turns the beat off: a constant base, however hard the music hits
+    e = fx(**quiet)
+    e.beat_strength = 0.0
+    assert {b for _dt, b in bases(e)} == {rest}
+    e = GDEffects(idle_color=IDLE, beat_strength=0.0)
+    e.update(gd(**quiet), [ev("level_start")], T0)
+    assert {b for _dt, b in bases(e)} == {rest}
+    # the default: a visible swell, well under 100% (about 34% of the LED output)
+    lo, hi = swing(bases(fx(**quiet)))
+    assert lo == val_of(rest) and 1.5 * lo <= hi <= val_of(lit(VIVID_P1, 1.0, 0.3)) < 0.5
+    # the swell grows with the setting; strength 1.0 gets (nearly) to full brightness
+    peaks = []
+    for strength in (0.0, 0.15, 0.3, 0.6, 1.0):
+        e = fx(**quiet)
+        e.beat_strength = strength
+        peaks.append(swing(bases(e))[1])
+    assert peaks == sorted(peaks) and peaks[0] == lo and peaks[-1] >= 0.85
+    # out-of-range settings are clamped, and a live change applies to the next frame
+    for wild, same in ((7.0, 1.0), (-3.0, 0.0)):
+        a, b = fx(**quiet), fx(**quiet)
+        a.beat_strength, b.beat_strength = wild, same
+        assert bases(a) == bases(b)
+    e = fx(**quiet)
+    list(play(e, T0 + 1, 3.0, **quiet))
+    e.beat_strength = 0.0
+    assert {s.base for _dt, s in play(e, T0 + 4, 3.0, **quiet)} == {rest}
+    # practice mode gets the same treatment, and no beat while paused
+    e = fx(practice=True)
+    e.beat_strength = 0.0
+    assert {s.base for _dt, s in play(e, T0 + 1, 4.0, practice=True)} == {led_gamma(PRACTICE_GREEN)}
+    e = fx(**quiet, paused=True)
+    paused = {s.base for _dt, s in play(e, T0 + 1, 4.0, paused=True, **quiet)}
+    assert len(paused) == 1
+
+
+def test_beat_attack_is_not_instant() -> None:
+    bt = BeatTracker(decay=0.35, attack=0.06, max_per_second=4)
+    for i in range(30 * 4):                          # a window: rest at 1, hits at 10
+        bt.update((10.0 if i % 15 == 0 else 1.0, 0, 0), i / 30)
+    t = 4.0
+    assert bt.update((10.0, 0, 0), t) < 0.2          # the hit starts from nothing ...
+    assert 0.35 < bt.level(t + 0.03) < 0.65          # ... rises over about 60 ms ...
+    assert bt.level(t + 0.06) > 0.99
+    assert 0.4 < bt.level(t + 0.06 + 0.175) < 0.6    # ... and falls over about 350 ms
+    assert bt.level(t + 0.06 + 0.36) == 0.0
+    # in the effects: a hard-edged beat never jumps the whole swing in one 30 fps frame
+    sq = lambda t: 14.0 if (t % 0.5) < 0.12 else 0.6    # noqa: E731
+    quiet = dict(bg=BLACK, accent=None, p1=VIVID_P1)
+    e = fx(**quiet)
+    frames = [(dt, s.base) for dt, s in play(e, T0 + 1, 8.0, signal=sq, **quiet)]
+    lo, hi = swing(frames)
+    late = [val_of(b) for dt, b in frames if dt >= 4.0]
+    steps = [abs(b - a) for a, b in zip(late, late[1:])]
+    assert hi > lo and max(steps) <= 0.75 * (hi - lo), (max(steps), hi - lo)
+    # the old instant-attack tracker is still what BeatTracker() gives by default
+    old = BeatTracker()
+    for i in range(30 * 4):
+        old.update((10.0 if i % 15 == 0 else 1.0, 0, 0), i / 30)
+    assert old.update((10.0, 0, 0), 4.0) == 1.0
+
+
+def test_beat_rate_limit() -> None:
+    def tracker():
+        return BeatTracker(decay=0.35, attack=0.06, max_per_second=4)
+
+    # 8 Hz hi-hats: at most 4 beats a second get through
+    hats = lambda t: 14.0 if (t * 8) % 1.0 < 0.3 else 0.6    # noqa: E731
+    bt = tracker()
+    for i in range(60 * 10):
+        bt.update((hats(i / 60), 0, 0), i / 60)
+    assert 15 <= bt.onsets <= 41, bt.onsets              # 10 s: 4 a second is 40
+    # a 2 Hz kick is below the limit: every beat gets through
+    bt = tracker()
+    for i in range(30 * 10):
+        bt.update((kick(i / 30), 0, 0), i / 30)
+    assert 17 <= bt.onsets <= 21, bt.onsets
+    # in the lights: the brightness swells (counted with hysteresis) at most 4 times a second
+    quiet = dict(bg=BLACK, accent=None, p1=VIVID_P1)
+    e = fx(**quiet)
+    frames = [(dt, s.base) for dt, s in play(e, T0 + 1, 10.0, signal=hats, hz=60, **quiet)]
+    lo, hi = swing(frames)
+    swells, high = 0, False
+    for _dt, b in frames[len(frames) // 4:]:
+        v = val_of(b)
+        if not high and v > lo + 0.7 * (hi - lo):
+            high, swells = True, swells + 1
+        elif high and v < lo + 0.3 * (hi - lo):
+            high = False
+    assert swells <= 4 * 7.5 + 1, swells
 
 
 def test_progress_bar() -> None:
@@ -451,7 +728,8 @@ def test_practice() -> None:
     # the practice green lifts with the beat but stays green
     e = fx(practice=True)
     tops = [s.base for _dt, s in play(e, T0 + 1, 5.0, practice=True)]
-    assert max(b[1] for b in tops) == 255 and min(b[1] for b in tops) == 91
+    swell = led_gamma(lift(PRACTICE_GREEN, BEAT_STRENGTH))        # the default beat
+    assert 91 < max(b[1] for b in tops) <= swell[1] < 160 and min(b[1] for b in tops) == 91
     assert all(b[1] > 3 * b[0] and b[1] > 3 * b[2] for b in tops)
 
 
@@ -644,6 +922,49 @@ def test_never_raises() -> None:
         e.update(gd(pulse=float(i * 3), pulse2=99.0, pulse3=-1.0), [], t)
         s = e.scene(t)
         assert all(0 <= x <= 255 for x in s.base)
+
+
+def test_settings_keep_both_keys() -> None:
+    import json
+    import tempfile
+    from rgbsync import ui
+    saved = ui.SETTINGS_PATH
+    with tempfile.TemporaryDirectory() as tmp:
+        path = ui.SETTINGS_PATH = pathlib.Path(tmp) / "settings.json"
+        try:
+            assert ui.load_color() == ui.DEFAULT_COLOR and ui.load_beat_strength() == 0.3
+            ui.save_color("#123456")
+            ui.save_beat_strength(0.55)
+            assert ui.load_color() == "#123456" and ui.load_beat_strength() == 0.55
+            ui.save_color("#654321")                          # neither drops the other
+            assert ui.load_color() == "#654321" and ui.load_beat_strength() == 0.55
+            ui.save_beat_strength(0.0)                        # 0 is a real setting
+            assert ui.load_color() == "#654321" and ui.load_beat_strength() == 0.0
+            ui.save_beat_strength(7)                          # clamped
+            assert ui.load_beat_strength() == 1.0
+            assert set(json.loads(path.read_text("utf-8"))) == {"color", "beat_strength"}
+            # other keys survive too; an old file with only a color still loads
+            path.write_text(json.dumps({"color": "#abcdef", "other": [1]}), "utf-8")
+            assert ui.load_beat_strength() == 0.3 and ui.load_color() == "#abcdef"
+            ui.save_beat_strength(0.2)
+            assert json.loads(path.read_text("utf-8")) == {
+                "color": "#abcdef", "other": [1], "beat_strength": 0.2}
+            # garbage values and files fall back to the defaults, saving repairs the file
+            for bad in ('{"beat_strength": "loud"}', '{"beat_strength": 5}',
+                        '{"beat_strength": NaN}', '{"beat_strength": null}', "[1, 2]",
+                        "not json"):
+                path.write_text(bad, "utf-8")
+                assert ui.load_beat_strength() == 0.3, bad
+                assert ui.load_color() == ui.DEFAULT_COLOR, bad
+            ui.save_color("#010203")
+            assert ui.load_color() == "#010203" and ui.load_beat_strength() == 0.3
+            # an unwritable location is ignored, as before
+            ui.SETTINGS_PATH = pathlib.Path(tmp) / "no" / "such" / "dir" / "settings.json"
+            ui.save_color("#ffffff")
+            ui.save_beat_strength(0.9)
+            assert ui.load_color() == ui.DEFAULT_COLOR
+        finally:
+            ui.SETTINGS_PATH = saved
 
 
 def test_scene_is_fast_and_deterministic() -> None:

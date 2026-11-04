@@ -40,7 +40,8 @@ python main.py
 
 Turns the lights into part of the game. Tick **Geometry Dash mode** in the app and, while you play, the lights follow the level:
 
-- The level's color: the most active vivid color the mod sees in the level (falling back to the background if it is vivid, then to your player color), shown rich and fairly dark, and punching to full brightness on every beat of the music. Black and white backgrounds are not colors, so they never turn the lights grey.
+- The level's color: the most active vivid color the mod sees in the level (falling back to the background if it is vivid, then to your player color), shown rich and fairly dark, with a gentle swell on the beat of the music. Black and white backgrounds are not colors, so they never turn the lights grey.
+- Calm by design: a new color has to last about 0.3 s before the lights fade to it (over about 0.35 s), and colors change at most about once a second, so a flickering level does not strobe. Beats rise over about 60 ms and fall over about 350 ms, and at most 4 a second get through. The **Beat flash** slider (0-100, default 30, remembered in `settings.json`) sets how far a beat lifts the lights; 0 turns the beat off. Death bursts, checkpoint flashes and the level-complete rainbow are not softened.
 - On a keyboard with live lighting (NuPhy Halo65): a progress bar across the keys in your player color, a white marker at your best percent, and WASD / arrows / space colored by the current game mode (cube, ship, wave, ...). Gravity flips fill the bar from the right.
 - Death bursts (gold on a new best), a rainbow sweep when you complete a level, green for practice mode (with a flash on every checkpoint), dimmed lights when paused.
 - The NuPhy side lights and halo show the level's difficulty. They are a slow saved setting, so they change once per level.

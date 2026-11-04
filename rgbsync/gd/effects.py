@@ -3,7 +3,7 @@
 ``update(state, events, now)`` is called every tick (or a few times a second);
 ``scene(now)`` is called at ~30 fps, does no I/O and is deterministic given the
 sequence of ``now`` values (all timelines come from ``now``; the only state is
-the 0.05 s color smoothing and the beat tracker's history). Fans and other
+the color stabilizer and the beat tracker's history). Fans and other
 non-keyboard devices show only ``Scene.base``, so every full-device effect goes
 through ``base`` too.
 
@@ -14,10 +14,14 @@ burst -> level complete celebration -> LED gamma on every color.
 Level color, in priority order: the mod's ``accent``, the background ``bg`` when it
 is vivid, the player color ``p1``, and a very dim neutral when none has a hue.
 Black, white and grey backgrounds mean "no color information" and are never shown
-as a grey wash. The chosen hue is pushed to a rich saturation, shown at 30%
-brightness at rest, and the real music beat (``BeatTracker``) lifts it to 100%.
-All colors are gamma-corrected (``led_gamma``) at the very end, because LEDs
-render mid values much brighter than screens.
+as a grey wash. The chosen hue is pushed to a rich saturation and shown at 45%
+brightness at rest. The chosen color goes through a ``ColorStabilizer`` (a new hue
+must persist for 0.3 s, then crossfades in over 0.35 s, at most once a second), so
+fast accent changes do not strobe. The real music beat (``BeatTracker``, rising
+over 60 ms, falling over 350 ms, at most 4 beats a second) lifts the base by
+``beat_strength`` (default 0.3) of the way to full brightness: a visible swell,
+not a strobe. All colors are gamma-corrected (``led_gamma``) at the very end,
+because LEDs render mid values much brighter than screens.
 
 ``Scene.edge`` (NuPhy halo and side lights) is a slow saved setting, so it is
 chosen once per level from the difficulty and stays constant; ``None`` whenever
@@ -27,13 +31,13 @@ from __future__ import annotations
 
 import colorsys
 import logging
-import math
 import time
 from typing import Callable
 
 from ..scene import RGB, Scene
 from .beat import BeatTracker
 from .listener import GDEvent, GDState
+from .stabilizer import ColorStabilizer
 
 log = logging.getLogger(__name__)
 
@@ -89,7 +93,11 @@ _KEY_RADIUS: dict[str, float] = {
     k: abs(c - _CENTER) / _CENTER for k, c in KEY_COLUMN.items()}
 
 # ------------------------------------------------------------------- tuning
-REST_BRIGHTNESS = 0.45                  # level color between beats (a beat lifts it to 1.0)
+REST_BRIGHTNESS = 0.45                  # level color between beats
+BEAT_STRENGTH = 0.3                     # default share of the way from rest to full a beat lifts
+BEAT_ATTACK_SECONDS = 0.06              # a beat rises over this long ...
+BEAT_DECAY_SECONDS = 0.35               # ... and falls over this long
+BEAT_MAX_PER_SECOND = 4.0               # faster beats (hi-hats) are ignored
 NEUTRAL_SCALE = 0.35                    # extra dimming when no color source has a hue
 PLAYER_FLOOR, PLAYER_CEIL = 0.65, 1.0
 LED_GAMMA = 2.2                         # applied to every color of the final Scene
@@ -97,8 +105,6 @@ MIN_SATURATION = 0.85                   # source colors are pushed to at least t
 VIVID = 0.35                            # saturation * value needed for a vivid background
 VIVID_PLAYER = 0.20                     # ... for the player color used as the fallback
 VIVID_ACCENT = 0.15                     # ... for the mod's accent (already vivid by contract)
-SMOOTH_SECONDS = 0.05                   # color smoothing settles in about this long
-HUE_SNAP_DEGREES = 30.0                 # a bigger hue jump is shown instantly
 PAUSED_BRIGHTNESS = 0.25                # of the LED output
 CHECKPOINT_SECONDS = 0.25
 BURST_SECONDS = 0.6
@@ -109,6 +115,9 @@ RAINBOW_SECONDS = 3.0
 RAINBOW_FADE = 0.3
 #: Pre-gamma factor that gives ``PAUSED_BRIGHTNESS`` after the gamma step.
 _PAUSED_SCALE = PAUSED_BRIGHTNESS ** (1.0 / LED_GAMMA)
+#: Source color when no source has a hue: a dim grey (white dimmed by
+#: ``NEUTRAL_SCALE``), so crossfades to and from it are plain RGB mixes.
+_NEUTRAL: tuple[float, float, float] = (255.0 * NEUTRAL_SCALE,) * 3
 
 
 # ------------------------------------------------------------ color helpers
@@ -199,12 +208,6 @@ def lift(color: RGB, amount: float) -> RGB:
     return scale(color, 1.0 + min(1.0, amount) * (255.0 / peak - 1.0))
 
 
-def _hue_distance(a: float, b: float) -> float:
-    """Degrees between two hues (0..1), 0 to 180."""
-    d = abs(a - b) % 1.0
-    return min(d, 1.0 - d) * 360.0
-
-
 def hue_color(h: float) -> RGB:
     """Fully saturated, full brightness color for hue ``h`` (0..1, wraps)."""
     x = (h % 1.0) * 6.0
@@ -224,19 +227,21 @@ def edge_for(difficulty: str) -> RGB:
 class GDEffects:
     """Maps Geometry Dash state/events to lighting Scenes."""
 
-    def __init__(self, idle_color: RGB = RED) -> None:
+    def __init__(self, idle_color: RGB = RED, beat_strength: float = BEAT_STRENGTH) -> None:
         #: Shown while the game is not connected (the app's chosen color).
         self.idle_color: RGB = idle_color
+        #: How far a beat lifts the base from rest to full brightness, 0.0-1.0
+        #: (0 = beats off). May be changed at any time (a plain float write).
+        self.beat_strength: float = beat_strength
         self._state: GDState | None = None      # latest state, as given
         self._data = GDState()                  # latest state seen while connected
         self._edge: RGB | None = None
-        self._beat = BeatTracker()
-        self._smooth: tuple[float, float, float] | None = None
-        self._smooth_t = 0.0
-        self._smooth_hue: float | None = None
+        self._beat = BeatTracker(decay=BEAT_DECAY_SECONDS, attack=BEAT_ATTACK_SECONDS,
+                                 max_per_second=BEAT_MAX_PER_SECOND)
+        self._stab = ColorStabilizer()
         self._source_key: tuple | None = None
         self._source_val: tuple[tuple[float, float, float], float | None] = (
-            (255.0, 255.0, 255.0), None)
+            _NEUTRAL, None)
         self._p1_src: RGB | None = None
         self._p1_bar: RGB = WHITE
         self._death_t: float | None = None
@@ -260,7 +265,7 @@ class GDEffects:
             if self._edge is None:             # joined mid-level: no level_start seen
                 self._edge = edge_for(state.difficulty)
         else:
-            self._smooth = None                # snap to the level color on reconnect
+            self._stab.reset()                 # snap to the level color on reconnect
             self._beat.reset()
             self._death_t = self._checkpoint_t = None
 
@@ -270,6 +275,7 @@ class GDEffects:
             self._edge = edge_for(str(ev.detail.get("difficulty", "unrated")))
             self._death_t = self._complete_t = self._checkpoint_t = None
             self._beat.reset()                 # new music: new scale
+            self._stab.reset()                 # new level: its color at once, no fade
         elif kind == "level_exit":
             self._edge = None
             self._death_t = self._checkpoint_t = None
@@ -304,7 +310,8 @@ class GDEffects:
 
     def _level_source(self, data: GDState) -> tuple[tuple[float, float, float], float | None]:
         """Full-brightness, saturated color of the level and its hue (None when no
-        source has a hue). Priority: accent, vivid bg, player color, neutral."""
+        source has a hue: then a dim grey). Priority: accent, vivid bg, player
+        color, neutral."""
         key = (data.accent, data.bg, data.p1)
         if key == self._source_key:
             return self._source_val
@@ -316,7 +323,7 @@ class GDEffects:
         elif vividness(data.p1) >= VIVID_PLAYER:
             chosen = data.p1
         if chosen is None:
-            val = ((255.0, 255.0, 255.0), None)
+            val = (_NEUTRAL, None)
         else:
             h, s, _v = hsv(chosen)
             r, g, b = colorsys.hsv_to_rgb(h, max(s, MIN_SATURATION), 1.0)
@@ -324,19 +331,11 @@ class GDEffects:
         self._source_key, self._source_val = key, val
         return val
 
-    def _level_color(self, data: GDState, now: float) -> tuple[float, float, float] | None:
-        """Smoothed full-brightness level color, or None for the neutral fallback."""
+    def _level_color(self, data: GDState, now: float) -> tuple[float, float, float]:
+        """The stabilized full-brightness level color (a dim grey for the neutral
+        fallback)."""
         target, hue = self._level_source(data)
-        sm = self._smooth
-        if (sm is None or hue is None or self._smooth_hue is None
-                or _hue_distance(hue, self._smooth_hue) > HUE_SNAP_DEGREES):
-            sm = target                            # first frame / big color change: instant
-        else:
-            k = 1.0 - math.exp(-3.0 * max(0.0, now - self._smooth_t) / SMOOTH_SECONDS)
-            sm = (sm[0] + (target[0] - sm[0]) * k, sm[1] + (target[1] - sm[1]) * k,
-                  sm[2] + (target[2] - sm[2]) * k)
-        self._smooth, self._smooth_t, self._smooth_hue = sm, now, hue
-        return None if hue is None else sm
+        return self._stab.update(target, hue, now)
 
     def _scene(self, now: float) -> Scene:
         st = self._state
@@ -347,13 +346,12 @@ class GDEffects:
             return Scene(base=self.idle_color, edge=None)
         data = self._data
 
-        # level color at its resting brightness; the beat lifts it
+        # level color at its resting brightness; the beat lifts it by beat_strength
         sm = self._level_color(data, now)
         beat = 0.0 if data.paused else self._beat.level(now)
+        beat *= min(1.0, max(0.0, self.beat_strength))
         if data.practice:
             base: RGB = lift(PRACTICE_GREEN, beat)
-        elif sm is None:
-            base = scale(WHITE, NEUTRAL_SCALE * (REST_BRIGHTNESS + (1.0 - REST_BRIGHTNESS) * beat))
         else:
             base = scale((_clamp(sm[0]), _clamp(sm[1]), _clamp(sm[2])),
                          REST_BRIGHTNESS + (1.0 - REST_BRIGHTNESS) * beat)

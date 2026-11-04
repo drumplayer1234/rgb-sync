@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from tkinter import colorchooser, messagebox, ttk
 
-from .gd.effects import GDEffects, make_source
+from .gd.effects import BEAT_STRENGTH, GDEffects, make_source
 from .gd.listener import GDListener
 from .gd.sim import FakeGDSender
 from .live import LiveEngine
@@ -27,10 +27,30 @@ PRESETS = {
 }
 
 
+def _read_settings() -> dict:
+    """The whole settings.json as a dict ({} when missing or unreadable)."""
+    try:
+        data = json.loads(SETTINGS_PATH.read_text("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _update_settings(**changes) -> None:
+    """Merge ``changes`` into settings.json, keeping every other key (failures are
+    ignored)."""
+    try:
+        data = _read_settings()
+        data.update(changes)
+        SETTINGS_PATH.write_text(json.dumps(data), "utf-8")
+    except Exception:
+        log.debug("could not save settings", exc_info=True)
+
+
 def load_color() -> str:
     """Last used color from settings.json, or the default."""
     try:
-        color = json.loads(SETTINGS_PATH.read_text("utf-8")).get("color", "")
+        color = _read_settings().get("color", "")
         if isinstance(color, str) and len(color) == 7 and color[0] == "#":
             int(color[1:], 16)
             return color
@@ -40,11 +60,25 @@ def load_color() -> str:
 
 
 def save_color(color: str) -> None:
-    """Persist the chosen color (failures are ignored)."""
+    """Persist the chosen color (other settings are kept; failures are ignored)."""
+    _update_settings(color=color)
+
+
+def load_beat_strength() -> float:
+    """Last used Geometry Dash "Beat flash" strength (0.0-1.0), or the default."""
     try:
-        SETTINGS_PATH.write_text(json.dumps({"color": color}), "utf-8")
+        value = float(_read_settings()["beat_strength"])
+        if 0.0 <= value <= 1.0:          # also rejects NaN
+            return value
     except Exception:
-        log.debug("could not save settings", exc_info=True)
+        pass
+    return BEAT_STRENGTH
+
+
+def save_beat_strength(value: float) -> None:
+    """Persist the "Beat flash" strength (other settings are kept; failures are
+    ignored)."""
+    _update_settings(beat_strength=round(min(1.0, max(0.0, float(value))), 3))
 
 
 def hex_to_rgb(color: str) -> tuple[int, int, int]:
@@ -59,6 +93,7 @@ class App:
         self.root = root
         self.manager = manager
         self.color = load_color()
+        self.beat_strength = load_beat_strength()
         self._jobs: queue.Queue[Callable[[], None] | None] = queue.Queue()
         self._busy = False
         self._closing = False
@@ -70,6 +105,7 @@ class App:
         self._gd_sender: FakeGDSender | None = None
         self._gd_test_thread: threading.Thread | None = None
         self._gd_after: str | None = None
+        self._beat_save_after: str | None = None
         self._build()
         self._worker = threading.Thread(target=self._work_loop, daemon=True)
         self._worker.start()
@@ -143,6 +179,19 @@ class App:
         self.gd_test_btn.pack(side="right")
         self.gd_status = ttk.Label(box, text="Off")
         self.gd_status.pack(anchor="w", pady=(4, 0))
+        beat_row = ttk.Frame(box)
+        beat_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(beat_row, text="Beat flash:").pack(side="left")
+        self.beat_var = tk.DoubleVar(value=round(self.beat_strength * 100))
+        self.beat_scale = ttk.Scale(beat_row, from_=0, to=100, orient="horizontal",
+                                    variable=self.beat_var,
+                                    command=self._on_beat_scale)
+        self.beat_scale.pack(side="left", fill="x", expand=True, padx=6)
+        self.beat_label = ttk.Label(beat_row, width=5, anchor="e",
+                                    text=f"{round(self.beat_strength * 100)}%")
+        self.beat_label.pack(side="left")
+        ttk.Label(box, text="How hard the lights pulse on the music (0 = steady).",
+                  foreground="gray40").pack(anchor="w")
 
     # --- color ----------------------------------------------------------
     def set_color(self, color: str) -> None:
@@ -158,6 +207,22 @@ class App:
         _, hexcolor = colorchooser.askcolor(color=self.color, parent=self.root)
         if hexcolor:
             self.set_color(hexcolor)
+
+    def _on_beat_scale(self, _value: str = "") -> None:
+        """The "Beat flash" slider moved (main thread): apply live, save shortly after."""
+        percent = round(min(100.0, max(0.0, float(self.beat_var.get()))))
+        self.beat_strength = percent / 100.0
+        self.beat_label.configure(text=f"{percent}%")
+        if self._gd_effects is not None:
+            self._gd_effects.beat_strength = self.beat_strength
+        if self._beat_save_after is not None:
+            self.root.after_cancel(self._beat_save_after)
+        self._beat_save_after = self.root.after(400, self._save_beat)
+
+    def _save_beat(self) -> None:
+        """Write the slider value to settings.json (once it stops moving)."""
+        self._beat_save_after = None
+        save_beat_strength(self.beat_strength)
 
     # --- worker thread --------------------------------------------------
     def _work_loop(self) -> None:
@@ -273,7 +338,8 @@ class App:
             self._gd_refresh()
             return False
         self._gd_error = ""
-        effects = GDEffects(idle_color=hex_to_rgb(self.color))
+        effects = GDEffects(idle_color=hex_to_rgb(self.color),
+                            beat_strength=self.beat_strength)
         self._gd_listener, self._gd_effects = listener, effects
         self._gd_engine.start(make_source(listener, effects))
         self.gd_var.set(True)
@@ -356,6 +422,9 @@ class App:
     def on_close(self) -> None:
         """Stop Geometry Dash mode, release SDK control, then close the window."""
         self._stop_gd(apply=False)
+        if self._beat_save_after is not None:      # a slider change not saved yet
+            self.root.after_cancel(self._beat_save_after)
+            self._save_beat()
         if self._gd_after is not None:
             self.root.after_cancel(self._gd_after)
             self._gd_after = None

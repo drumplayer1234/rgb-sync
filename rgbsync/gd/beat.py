@@ -22,6 +22,9 @@ MIN_RANGE = 0.05            # (high - low) below this is a flat signal, in raw u
 MIN_RELATIVE_RANGE = 0.10   # ... and so is (high - low) / high below this
 LOW_PCT, HIGH_PCT = 0.05, 0.95
 SWITCH_RATIO = 1.3          # another meter must be this much more dynamic to take over
+ONSET_WINDOW = 0.15         # a beat's rising edge may keep lifting the level this long
+EDGE_FALL = 0.05            # ... until the hit weakens by this much (then it is over)
+NEW_BEAT_MARGIN = 0.10      # a new beat must beat the decaying level by this much
 _MAX_SAMPLES = 1500
 
 
@@ -33,9 +36,20 @@ class BeatTracker:
     """Turns raw meter samples into a 0-1 beat level."""
 
     def __init__(self, window: float = WINDOW_SECONDS, decay: float = DECAY_SECONDS,
-                 channels: int = 3) -> None:
+                 channels: int = 3, attack: float = 0.0,
+                 max_per_second: float = 0.0) -> None:
         self.window = window
         self.decay = decay
+        #: Seconds the level takes to rise to a beat (0 = instantly).
+        self.attack = max(0.0, attack)
+        #: Longest-run beat rate that gets through (0 = no limit).
+        self.max_per_second = max(0.0, max_per_second)
+        #: Beats that got through since the last ``reset``.
+        self.onsets = 0
+        self._out0 = 0.0                       # output level at ``_level_t``
+        self._onset_t: float | None = None
+        self._edge_open = False                # still on the rising edge of the last beat
+        self._prev_strength = 0.0
         self._hist: list[deque[tuple[float, float]]] = [
             deque(maxlen=_MAX_SAMPLES) for _ in range(channels)]
         self._level = 0.0
@@ -48,14 +62,28 @@ class BeatTracker:
         for q in self._hist:
             q.clear()
         self._level = 0.0
+        self._out0 = 0.0
+        self._onset_t = None
+        self._edge_open = False
+        self._prev_strength = 0.0
+        self.onsets = 0
         self._last_t = None
         self.channel = None
 
     # ------------------------------------------------------------------ output
-    def level(self, now: float) -> float:
-        """Beat level at ``now`` (0 to 1), decayed since the last ``update``."""
+    def _raw(self, now: float) -> float:
+        """The beat envelope: held for ``attack`` s after the last raise, then falling."""
         dt = max(0.0, now - self._level_t)
-        return max(0.0, min(1.0, self._level - dt / self.decay))
+        fall = max(0.0, dt - self.attack)
+        return max(0.0, min(1.0, self._level - fall / self.decay))
+
+    def level(self, now: float) -> float:
+        """Beat level at ``now`` (0 to 1), as of the last ``update``."""
+        raw = self._raw(now)
+        if self.attack <= 0.0:
+            return raw
+        dt = max(0.0, now - self._level_t)
+        return min(raw, self._out0 + dt / self.attack)     # rises at most 1 / attack per s
 
     # ------------------------------------------------------------------- input
     def update(self, values: Sequence[float], now: float) -> float:
@@ -63,7 +91,8 @@ class BeatTracker:
         if self._last_t is not None and now < self._last_t - 1.0:
             self.reset()                       # clock jumped back: start over
         self._last_t = now
-        current = self.level(now)
+        current = self._raw(now)
+        shown = self.level(now)
 
         stats = []                             # (score, lo, hi, mean) per meter
         for i, q in enumerate(self._hist):
@@ -91,9 +120,29 @@ class BeatTracker:
             thr = min(1.0, max(0.0, (mean - lo) / span))
             if x > thr:
                 strength = min(1.0, (x - thr) / max(1.0 - thr, 0.2))
-        self._level = max(current, strength)
-        self._level_t = now
-        return self._level
+        if strength < self._prev_strength - EDGE_FALL:
+            self._edge_open = False            # the hit peaked: a later rise is a new hit
+        self._prev_strength = strength
+        if strength > current and self._accept(strength, current, now):
+            self._level = strength
+            self._out0 = shown
+            self._level_t = now
+        return self.level(now)
+
+    def _accept(self, strength: float, current: float, now: float) -> bool:
+        """Whether a hit that would raise the level ``current`` to ``strength`` gets
+        through the beat rate limit."""
+        if self.max_per_second <= 0.0:
+            return True
+        since = float("inf") if self._onset_t is None else now - self._onset_t
+        if self._edge_open and since < ONSET_WINDOW:
+            return True                        # still the rising edge of the same beat
+        if since >= 1.0 / self.max_per_second and strength > current + NEW_BEAT_MARGIN:
+            self._onset_t = now
+            self._edge_open = True
+            self.onsets += 1
+            return True
+        return False
 
     @staticmethod
     def _stats(q: deque[tuple[float, float]], now: float):
