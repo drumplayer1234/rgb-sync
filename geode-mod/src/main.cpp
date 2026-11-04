@@ -4,12 +4,13 @@
 // This mod only observes the game. It never changes gameplay and touches nothing
 // but that one loopback socket.
 
-// winsock2.h has to come before anything that pulls in windows.h (the Geode headers do).
-#include <winsock2.h>
-
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
+
+// Geode's precompiled headers already pull in windows.h and with it winsock.h, so
+// winsock2.h would clash. Everything used below is in winsock.h.
+#include <winsock.h>
 
 #include <algorithm>
 #include <chrono>
