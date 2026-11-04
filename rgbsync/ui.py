@@ -10,6 +10,10 @@ from collections.abc import Callable
 from pathlib import Path
 from tkinter import colorchooser, messagebox, ttk
 
+from .gd.effects import GDEffects, make_source
+from .gd.listener import GDListener
+from .gd.sim import FakeGDSender
+from .live import LiveEngine
 from .manager import Manager
 
 log = logging.getLogger(__name__)
@@ -58,17 +62,26 @@ class App:
         self._jobs: queue.Queue[Callable[[], None] | None] = queue.Queue()
         self._busy = False
         self._closing = False
+        # Geometry Dash mode (all touched on the main thread only)
+        self._gd_listener: GDListener | None = None
+        self._gd_effects: GDEffects | None = None
+        self._gd_engine = LiveEngine(manager)
+        self._gd_error = ""
+        self._gd_sender: FakeGDSender | None = None
+        self._gd_test_thread: threading.Thread | None = None
+        self._gd_after: str | None = None
         self._build()
         self._worker = threading.Thread(target=self._work_loop, daemon=True)
         self._worker.start()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.rescan()
+        self._gd_after = root.after(500, self._gd_tick)
 
     # --- layout ---------------------------------------------------------
     def _build(self) -> None:
         root = self.root
         root.title("RGB Sync")
-        root.minsize(520, 460)
+        root.minsize(520, 540)
         frm = ttk.Frame(root, padding=10)
         frm.pack(fill="both", expand=True)
 
@@ -114,6 +127,22 @@ class App:
         self.restore_btn.pack(side="left")
         self.message = ttk.Label(actions, text="")
         self.message.pack(side="left", padx=10)
+        self._build_gd(frm)
+
+    def _build_gd(self, frm: ttk.Frame) -> None:
+        box = ttk.LabelFrame(frm, text="Geometry Dash", padding=6)
+        box.pack(fill="x", pady=4)
+        top = ttk.Frame(box)
+        top.pack(fill="x")
+        self.gd_var = tk.BooleanVar(value=False)
+        self.gd_check = ttk.Checkbutton(top, text="Geometry Dash mode",
+                                        variable=self.gd_var,
+                                        command=self._on_gd_toggle)
+        self.gd_check.pack(side="left")
+        self.gd_test_btn = ttk.Button(top, text="Test effects", command=self.gd_test)
+        self.gd_test_btn.pack(side="right")
+        self.gd_status = ttk.Label(box, text="Off")
+        self.gd_status.pack(anchor="w", pady=(4, 0))
 
     # --- color ----------------------------------------------------------
     def set_color(self, color: str) -> None:
@@ -121,6 +150,8 @@ class App:
         self.color = color
         self.preview.configure(bg=color)
         save_color(color)
+        if self._gd_effects is not None:     # shown whenever the game is not running
+            self._gd_effects.idle_color = hex_to_rgb(color)
 
     def pick_color(self) -> None:
         """Open the system color chooser."""
@@ -180,13 +211,20 @@ class App:
         self.apply_btn.configure(state=state)
         self.rescan_btn.configure(state=state)
         self.restore_btn.configure(state=state)
+        self._gd_buttons(state)
 
     def rescan(self) -> None:
         """Reconnect all backends and refresh the device list."""
+        if self._busy or self._closing:
+            return
+        self._stop_gd(apply=False)          # reconnecting would pull devices from under it
         self._submit(self.manager.connect_all, "Scanning...")
 
     def apply(self) -> None:
         """Apply the current color to every device."""
+        if self._busy or self._closing:
+            return
+        self._stop_gd(apply=False)          # this write replaces the idle color anyway
         r, g, b = hex_to_rgb(self.color)
         self._submit(lambda: self.manager.apply_color(r, g, b), "Applying...")
 
@@ -199,6 +237,7 @@ class App:
                 "Put every device back to how it was before RGB Sync changed it?",
                 parent=self.root):
             return
+        self._stop_gd(apply=False)          # the engine and a restore must not fight
         results: dict[str, str] = {}
 
         def work() -> None:
@@ -211,9 +250,115 @@ class App:
 
         self._submit(work, "Restoring...", show)
 
+    # --- Geometry Dash --------------------------------------------------
+    def _on_gd_toggle(self) -> None:
+        """The "Geometry Dash mode" checkbox was clicked."""
+        if self.gd_var.get():
+            self._start_gd()
+        else:
+            self._stop_gd(apply=True)
+
+    def _start_gd(self) -> bool:
+        """Listen for the game and run the live engine. False when it cannot start."""
+        if self._gd_listener is not None:
+            return True
+        if self._closing:
+            return False
+        listener = GDListener()
+        if not listener.start():
+            self.gd_var.set(False)
+            self._gd_error = (f"Port {listener.port} in use"
+                              if listener.status == "port in use"
+                              else f"Geometry Dash: {listener.status}")
+            self._gd_refresh()
+            return False
+        self._gd_error = ""
+        effects = GDEffects(idle_color=hex_to_rgb(self.color))
+        self._gd_listener, self._gd_effects = listener, effects
+        self._gd_engine.start(make_source(listener, effects))
+        self.gd_var.set(True)
+        self._gd_refresh()
+        return True
+
+    def _stop_gd(self, apply: bool) -> None:
+        """Stop the test sender, the engine and the listener. With ``apply``,
+        also put the current color on every device (on the worker thread) so
+        no game frame stays on the lights."""
+        sender = self._gd_sender
+        if sender is not None:
+            sender.stop()
+        listener = self._gd_listener
+        if listener is None:
+            return
+        self._gd_listener = self._gd_effects = None
+        self._gd_engine.stop()
+        listener.stop()
+        self.gd_var.set(False)
+        self._gd_error = ""
+        if apply and not self._closing:
+            r, g, b = hex_to_rgb(self.color)
+            self._jobs.put(lambda: self.manager.apply_color(r, g, b))
+        self._gd_refresh()
+
+    def gd_test(self) -> None:
+        """Play the simulator's scripted game once into our own listener."""
+        thread = self._gd_test_thread
+        if self._closing or self._busy or (thread is not None and thread.is_alive()):
+            return
+        if not self._start_gd() or self._gd_listener is None:
+            return
+        sender = FakeGDSender(port=self._gd_listener.port)
+        self._gd_sender = sender
+        self._gd_test_thread = threading.Thread(target=sender.run, daemon=True,
+                                                name="gd-test")
+        self._gd_test_thread.start()
+        self._gd_refresh()
+
+    def _gd_buttons(self, state: str) -> None:
+        """Enable/disable the Geometry Dash widgets (state: "normal"/"disabled")."""
+        thread = self._gd_test_thread
+        testing = thread is not None and thread.is_alive()
+        self.gd_check.configure(state=state)
+        self.gd_test_btn.configure(
+            state="disabled" if testing else state,
+            text="Testing..." if testing else "Test effects")
+
+    def _gd_refresh(self) -> None:
+        """Update the status line and the test button."""
+        listener = self._gd_listener
+        if listener is None:
+            text = self._gd_error or "Off"
+        elif listener.status != "listening":
+            text = f"Geometry Dash: {listener.status}"
+        else:
+            st = listener.state()
+            if st.connected:
+                extra = f"{st.pct:.0f}%, {st.mode}"
+                if st.practice:
+                    extra += ", practice"
+                if st.paused:
+                    extra += ", paused"
+                text = f"Playing: {st.level_name or 'unnamed level'} ({extra})"
+            else:
+                text = "Waiting for Geometry Dash..."
+        self.gd_status.configure(text=text)
+        self._gd_buttons("disabled" if self._busy else "normal")
+
+    def _gd_tick(self) -> None:
+        """Every 500 ms, on the main thread: refresh the status line."""
+        self._gd_after = None
+        if self._closing:
+            return
+        self._gd_refresh()
+        self._gd_after = self.root.after(500, self._gd_tick)
+
     # --- shutdown -------------------------------------------------------
     def on_close(self) -> None:
-        """Release SDK control, then close the window."""
+        """Stop Geometry Dash mode, release SDK control, then close the window."""
+        self._stop_gd(apply=False)
+        if self._gd_after is not None:
+            self.root.after_cancel(self._gd_after)
+            self._gd_after = None
         self._closing = True
         self._jobs.put(self.manager.close_all)
         self._jobs.put(None)

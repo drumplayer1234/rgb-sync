@@ -11,7 +11,8 @@ Set one static color on all your RGB keyboards and peripherals at once, across C
 - Per-brand status display and a "Rescan" button.
 - "Restore original" puts every device back the way it was before RGB Sync touched it.
 - Remembers your last color (`settings.json`, next to the app).
-- Pure Python 3.12 + tkinter; static colors only (no effects, no per-device colors).
+- Optional [Geometry Dash mode](#geometry-dash-mode): live game-reactive lighting (needs a small Geode mod).
+- Pure Python 3.12 + tkinter; otherwise static colors only (no per-device colors).
 
 ## Supported hardware
 
@@ -33,6 +34,25 @@ Windows only. Needs Python 3.12.
 ```
 pip install -r requirements.txt
 python main.py
+```
+
+## Geometry Dash mode
+
+Turns the lights into part of the game. Tick **Geometry Dash mode** in the app and, while you play, the lights follow the level:
+
+- The background color of the level, brightened so dark levels still show, pulsing with the music.
+- On a keyboard with live lighting (NuPhy Halo65): a progress bar across the keys in your player color, a white marker at your best percent, and WASD / arrows / space colored by the current game mode (cube, ship, wave, ...). Gravity flips fill the bar from the right.
+- Death bursts (gold on a new best), a rainbow sweep when you complete a level, green for practice mode (with a flash on every checkpoint), dimmed lights when paused.
+- The NuPhy side lights and halo show the level's difficulty. They are a slow saved setting, so they change once per level.
+- Other devices (fans and so on) only get the level color and the full-device effects. When the game is not running, everything shows the color you picked in the app. Unticking the box applies that color again.
+
+It needs the **Geode mod** in [`geode-mod/`](geode-mod/), which sends the game state to the app over UDP on `127.0.0.1:47831` (the app only listens on this computer). Install Geode and the mod as described in that folder's README. Geometry Dash 2.2091 needs **Geode 6 alpha** (`v6.0.0-alpha.1`). The wire format is in [`docs/gd-protocol.md`](docs/gd-protocol.md). If the app says "Port 47831 in use", another program (or a second copy of RGB Sync) already has the port.
+
+**Try it without the game:** tick Geometry Dash mode and press **Test effects**. The app plays a scripted 40-second session (a hard level with deaths, a new best, practice mode, then a full run to the end) into its own listener. Or run the simulator from a terminal:
+
+```
+python -m rgbsync.gd.sim --print --speed 4   # no hardware: prints the scenes as text
+python -m rgbsync.gd.sim --send              # sends a pass to a running RGB Sync window
 ```
 
 ## Restore
