@@ -145,25 +145,44 @@ namespace rgb {
 
     // ---- accent color -----------------------------------------------------
     //
-    // "The level's most active vivid color right now." Channel 1000 (background) is
-    // often black or static, so this looks at every color channel the level uses.
-    // Read-only: it only calls GJEffectManager::colorExists / activeColorForIndex,
-    // which are plain lookups, and it runs at about 12 Hz with the result reused
-    // between scans.
+    // "The level's most prominent vivid color right now." Every color channel gets a
+    // score = vividness x log2(1 + usage), where usage is how many objects in view use
+    // the channel (plus a fixed weight for the background, ground and line channels,
+    // which fill the screen without being objects). Channels nothing visible uses
+    // score 0, so a vivid but invisible channel can never be picked.
+    //
+    // Read-only: it reads GJBaseGameLayer::m_activeObjects (the objects the game
+    // currently has in view), each object's GJSpriteColor ids, and calls
+    // GJEffectManager::colorExists / activeColorForIndex (plain lookups). Nothing is
+    // allocated: all tables are fixed arrays. Objects are counted about 4.5 times a
+    // second (at most kMaxCounted per pass); the channel choice runs about 12.5 times
+    // a second and the result is reused between scans.
 
     constexpr int kAccentSlots = 1010;   // channel ids 0..1009 index the arrays below
     constexpr size_t kColorSlots = 1102; // GJEffectManager keeps color slots 0..1101
-    constexpr auto kAccentScanInterval = std::chrono::milliseconds(80); // about 12.5 Hz
-    constexpr auto kAccentRecent = std::chrono::milliseconds(1500);
+    constexpr auto kAccentScanInterval = std::chrono::milliseconds(80);  // about 12.5 Hz
+    constexpr auto kUsageScanInterval = std::chrono::milliseconds(220);  // about 4.5 Hz
+    constexpr size_t kMaxCounted = 2000;  // objects looked at per counting pass
     constexpr float kVividMin = 0.35f;    // saturation x value below this never counts
-    constexpr float kSwitchMargin = 0.1f; // a challenger must beat the current pick by this
     constexpr int kChangeDelta = 8;       // RGB component move that counts as "changed"
+    constexpr auto kBoostWindow = std::chrono::milliseconds(1000);
+    constexpr float kBoost = 1.5f;         // score multiplier for a channel that just changed
+    constexpr float kSwitchFactor = 1.25f; // a challenger must beat the current pick by 25%
+    constexpr auto kMinHold = std::chrono::milliseconds(500); // no switch sooner than this
+    // Fixed usage added to channels that cover the screen without being objects.
+    constexpr int kUsageBackground = 600; // 1000
+    constexpr int kUsageGround = 120;     // 1001, 1009
+    constexpr int kUsageLine = 12;        // 1002, 1003
 
     ccColor3B g_prevColor[kAccentSlots];
     bool g_prevValid[kAccentSlots];
     bool g_everChanged[kAccentSlots];
     Clock::time_point g_changedAt[kAccentSlots];
+    int g_usage[kAccentSlots]; // in-view objects per channel, from the last counting pass
     Clock::time_point g_lastAccentScan{};
+    Clock::time_point g_lastUsageScan{};
+    Clock::time_point g_lastSwitch{};
+    bool g_hasSwitched = false;
     int g_accentChannel = -1; // -1: nothing vivid
     ccColor3B g_accentColor{0, 0, 0};
 
@@ -174,8 +193,12 @@ namespace rgb {
             g_prevValid[i] = false;
             g_everChanged[i] = false;
             g_changedAt[i] = Clock::time_point{};
+            g_usage[i] = 0;
         }
         g_lastAccentScan = Clock::time_point{};
+        g_lastUsageScan = Clock::time_point{};
+        g_lastSwitch = Clock::time_point{};
+        g_hasSwitched = false;
         g_accentChannel = -1;
         g_accentColor = ccColor3B{0, 0, 0};
     }
@@ -203,6 +226,58 @@ namespace rgb {
         return (ch >= 1 && ch <= 1004) || ch == 1009;
     }
 
+    // The channel a GJSpriteColor really uses: its own id, or the object's default
+    // channel when the id is 0 (same rule as GJSpriteColor::getColorMode).
+    int channelOf(GJSpriteColor const* color) {
+        if (!color) return 0;
+        return color->m_colorID != 0 ? color->m_colorID : color->m_defaultColorID;
+    }
+
+    void countChannel(GJSpriteColor const* color) {
+        int ch = channelOf(color);
+        if (ch >= 1 && ch < kAccentSlots) ++g_usage[ch];
+    }
+
+    // Counts how many of the objects the game currently has in view use each channel.
+    // m_activeObjectsCount says how many entries of m_activeObjects are live, so it is
+    // clamped to the vector's real size and every pointer is null-checked. More than
+    // kMaxCounted objects are sampled with a stride and scaled back up.
+    void countUsage(GJBaseGameLayer* layer) {
+        for (int i = 0; i < kAccentSlots; ++i) g_usage[i] = 0;
+        if (!layer) return;
+
+        auto const& objects = layer->m_activeObjects;
+        int liveCount = layer->m_activeObjectsCount;
+        size_t n = liveCount > 0 ? std::min(static_cast<size_t>(liveCount), objects.size()) : 0;
+        if (n == 0) return;
+
+        size_t stride = n > kMaxCounted ? (n + kMaxCounted - 1) / kMaxCounted : 1;
+        for (size_t i = 0; i < n; i += stride) {
+            GameObject* obj = objects[i];
+            if (!obj) continue;
+            // Triggers, hidden objects and toggled-off groups draw nothing.
+            if (obj->m_isTrigger || obj->m_isHide || obj->m_isGroupDisabled) continue;
+            countChannel(obj->m_baseColor);   // may be null
+            countChannel(obj->m_detailColor); // null for objects without a detail color
+        }
+        if (stride > 1) {
+            for (int i = 0; i < kAccentSlots; ++i) {
+                g_usage[i] = static_cast<int>(std::min<long long>(
+                    static_cast<long long>(g_usage[i]) * static_cast<long long>(stride), 1000000LL));
+            }
+        }
+    }
+
+    // How much of the screen a channel covers: its object count plus, for the channels
+    // that fill the screen by themselves, a fixed weight.
+    int usageOf(int ch) {
+        int usage = g_usage[ch];
+        if (ch == 1000) usage += kUsageBackground;
+        else if (ch == 1001 || ch == 1009) usage += kUsageGround;
+        else if (ch == 1002 || ch == 1003) usage += kUsageLine;
+        return usage;
+    }
+
     void scanAccent(GJEffectManager* em, Clock::time_point now) {
         // Without the "which channels exist" table, report nothing rather than guess.
         if (!em || em->m_colorActionVector.size() < kColorSlots) {
@@ -210,14 +285,10 @@ namespace rgb {
             return;
         }
 
-        int recentCh = -1; // changed within 1.5 s: most recent change, then highest score
-        float recentScore = 0.f;
-        Clock::time_point recentAt{};
-        ccColor3B recentColor{0, 0, 0};
-        int bestCh = -1; // highest vivid score overall
+        int bestCh = -1; // highest score overall
         float bestScore = 0.f;
         ccColor3B bestColor{0, 0, 0};
-        float currentScore = -1.f; // the current choice, if it is still vivid
+        float currentScore = -1.f; // the current choice, if it still qualifies
         ccColor3B currentColor{0, 0, 0};
 
         for (int ch = 1; ch <= 1009; ++ch) {
@@ -235,8 +306,13 @@ namespace rgb {
             g_prevColor[ch] = c;
             g_prevValid[ch] = true;
 
-            float score = vividness(c);
-            if (score < kVividMin) continue;
+            int usage = usageOf(ch);
+            if (usage <= 0) continue; // nothing visible uses this channel
+            float vivid = vividness(c);
+            if (vivid < kVividMin) continue;
+
+            float score = vivid * std::log2(1.f + static_cast<float>(usage));
+            if (g_everChanged[ch] && now - g_changedAt[ch] <= kBoostWindow) score *= kBoost;
 
             if (ch == g_accentChannel) {
                 currentScore = score;
@@ -247,28 +323,27 @@ namespace rgb {
                 bestCh = ch;
                 bestColor = c;
             }
-            if (g_everChanged[ch] && now - g_changedAt[ch] <= kAccentRecent) {
-                bool better = recentCh < 0 || g_changedAt[ch] > recentAt ||
-                              (g_changedAt[ch] == recentAt && score > recentScore);
-                if (better) {
-                    recentCh = ch;
-                    recentScore = score;
-                    recentAt = g_changedAt[ch];
-                    recentColor = c;
-                }
-            }
         }
 
-        if (recentCh >= 0) {
-            g_accentChannel = recentCh;
-            g_accentColor = recentColor;
-        } else if (bestCh < 0) {
-            g_accentChannel = -1; // nothing vivid
-        } else if (currentScore >= 0.f && bestScore <= currentScore + kSwitchMargin) {
-            g_accentColor = currentColor; // stay on the current choice, with its fresh color
-        } else {
+        if (bestCh < 0) { // nothing qualifies
+            g_accentChannel = -1;
+            return;
+        }
+        if (currentScore < 0.f) { // no current pick, or it stopped qualifying: take the best
             g_accentChannel = bestCh;
             g_accentColor = bestColor;
+            g_lastSwitch = now;
+            g_hasSwitched = true;
+            return;
+        }
+        bool held = g_hasSwitched && now - g_lastSwitch < kMinHold;
+        if (bestCh != g_accentChannel && !held && bestScore > currentScore * kSwitchFactor) {
+            g_accentChannel = bestCh;
+            g_accentColor = bestColor;
+            g_lastSwitch = now;
+            g_hasSwitched = true;
+        } else {
+            g_accentColor = currentColor; // stay on the current choice, with its fresh color
         }
     }
 
@@ -294,7 +369,12 @@ namespace rgb {
             pulse3 = std::clamp(finite(audio->m_pulse3), 0.f, 16.f);
         }
 
-        // Accent color: rescanned about 12 times a second, reused in between.
+        // Accent color: objects counted about 4.5 times a second, channels rescanned
+        // about 12 times a second, results reused in between.
+        if (now - g_lastUsageScan >= kUsageScanInterval) {
+            g_lastUsageScan = now;
+            countUsage(pl);
+        }
         if (now - g_lastAccentScan >= kAccentScanInterval) {
             g_lastAccentScan = now;
             scanAccent(pl->m_effectManager, now);
